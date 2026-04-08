@@ -1,11 +1,11 @@
-# flash
+# javaxFlash
 
-`flash` adalah library Python kecil untuk mengakses beberapa endpoint AI lewat satu client API yang sederhana.
+`javaxFlash` adalah library Python kecil untuk mengakses beberapa endpoint AI lewat satu client API yang sederhana.
 
 Tujuan library ini:
 
 - memberi satu entry point yang ringan: `FlashClient`
-- memudahkan pindah antara `flash` dan `deepseek`
+- memudahkan pindah antara provider `flash` dan `deepseek`
 - mendukung auto routing atau provider manual
 - mengembalikan format respons yang konsisten
 
@@ -35,7 +35,7 @@ python -m pip install rich
 Contoh paling sederhana:
 
 ```python
-from flash import FlashClient
+from javaxFlash import FlashClient
 
 client = FlashClient()
 
@@ -104,13 +104,13 @@ response = client.flash("Analisis bug ini", provider="deepseek")
 Kalau ingin mengubah perilaku default client:
 
 ```python
-from flash import FlashClient, FlashConfig
+from javaxFlash import FlashClient, FlashConfig
 
 config = FlashConfig(
     timeout=30.0,
     auto_route=True,
     fallback_enabled=True,
-    default_system_instruction="You are Flash, a concise and practical AI assistant.",
+    default_system_instruction="You are javaxFlash, a concise and practical AI assistant.",
 )
 
 client = FlashClient(config=config)
@@ -213,7 +213,7 @@ response = client.flash(
 
 ## Menjalankan Contoh Interaktif
 
-Contoh interaktif ada di [`examples/basic_usage.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/examples/basic_usage.py).
+Contoh interaktif ada di `examples/basic_usage.py`.
 
 Jalankan dengan:
 
@@ -231,11 +231,11 @@ python -m examples.basic_usage
 
 File yang paling penting:
 
-- [`flash/client.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/flash/client.py): entry point utama library
-- [`flash/config.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/flash/config.py): konfigurasi client
-- [`flash/router.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/flash/router.py): logika pemilihan provider
-- [`flash/providers.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/flash/providers.py): implementasi request ke provider
-- [`flash/models.py`](/home/javas/Dokumen/Javas Antony/Python/custom_lib/flash/flash/models.py): model respons
+- `javaxFlash/client.py`: entry point utama library
+- `javaxFlash/config.py`: konfigurasi client
+- `javaxFlash/router.py`: logika pemilihan provider
+- `javaxFlash/providers.py`: implementasi request ke provider
+- `javaxFlash/models.py`: model respons
 
 ## Catatan Penting
 
@@ -249,7 +249,7 @@ File yang paling penting:
 Kalau ingin contoh paling ringkas untuk dipakai di project lain:
 
 ```python
-from flash import FlashClient
+from javaxFlash import FlashClient
 
 client = FlashClient()
 response = client.flash("Buat ringkasan tentang REST API", mode="fast")

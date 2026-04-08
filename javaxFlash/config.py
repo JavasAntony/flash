@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class FlashConfig:
     timeout: float = 30.0
     default_provider: str = "flash"
-    default_model_name: str = "Flash"
+    default_model_name: str = "javaxFlash"
     default_gemini_model: str = "gemini-2.0-flash-lite"
     deepseek_temperature: float = 0.7
     auto_route: bool = True
@@ -15,7 +15,7 @@ class FlashConfig:
     request_logging: bool = False
     fallback_enabled: bool = True
     default_system_instruction: str = (
-        "You are Flash, a practical, concise, and helpful AI assistant."
+        "You are javaxFlash, a practical, concise, and helpful AI assistant."
     )
 
 

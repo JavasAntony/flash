@@ -1,4 +1,4 @@
-from flash import FlashClient, FlashConfig
+from javaxFlash import FlashClient, FlashConfig
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -14,15 +14,15 @@ def show_response(response) -> None:
     table.add_row("[bold cyan]Model[/bold cyan]", getattr(response, "model_used", "-") or "-")
     table.add_row("[bold cyan]Provider[/bold cyan]", getattr(response, "provider", "-") or "-")
     table.add_row("[bold cyan]Route Reason[/bold cyan]", getattr(response, "route_reason", "-") or "-")
-    console.print(Panel(table, title="[bold green]Flash Response[/bold green]", expand=False))
+    console.print(Panel(table, title="[bold green]javaxFlash Response[/bold green]", expand=False))
 
 
 def main() -> None:
-    console.print(Panel.fit("[bold yellow]Flash Client Example[/bold yellow]"))
+    console.print(Panel.fit("[bold yellow]javaxFlash Client Example[/bold yellow]"))
 
     config = FlashConfig(
         debug=True,
-        default_system_instruction="You are Flash, a concise and practical AI assistant.",
+        default_system_instruction="You are javaxFlash, a concise and practical AI assistant.",
     )
     client = FlashClient(config=config)
 
