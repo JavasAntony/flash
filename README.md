@@ -1,261 +1,378 @@
-# javaxFlash
+# JavaxFlash v3.0.0
 
-`javaxFlash` adalah library Python kecil untuk mengakses beberapa endpoint AI lewat satu client API yang sederhana.
+`JavaxFlash` is a lightweight Python AI client and router for multi-provider prompt workflows. It keeps the public API small while providing stronger foundations for production use: configurable retries, cleaner routing, structured output parsing, and optional Tavily-backed web grounding.
 
-Tujuan library ini:
+## Overview
 
-- memberi satu entry point yang ringan: `FlashClient`
-- memudahkan pindah antara provider `flash` dan `deepseek`
-- mendukung auto routing atau provider manual
-- mengembalikan format respons yang konsisten
+`JavaxFlash` is designed for developers who want:
 
-## Cocok untuk apa
+- one simple client for multiple AI providers
+- lightweight provider routing with sensible defaults
+- configurable retry and fallback behavior
+- optional grounded answers using Tavily skills
+- structured JSON-style output without a heavy framework
 
-- pertanyaan cepat dengan provider default `flash`
-- prompt reasoning yang lebih berat dengan `deepseek`
-- eksperimen lokal tanpa harus menulis wrapper request berulang-ulang
+The library is intentionally synchronous and compact in `v3.0.0`. It does not include streaming, chat memory, or async support in this release.
 
-## Install
+## Installation
 
-Install package inti:
-
-```bash
-python -m pip install -r requirements.txt
-python -m pip install -e .
-```
-
-Kalau ingin menjalankan contoh interaktif di folder `examples`, install juga `rich`:
+Install the package locally:
 
 ```bash
-python -m pip install rich
+pip install javaxflash
 ```
 
 ## Quick Start
 
-Contoh paling sederhana:
-
 ```python
-from javaxFlash import FlashClient
+from javaxFlash import Client
 
-client = FlashClient()
-
-response = client.flash("Jelaskan konsep Q-learning dengan sederhana")
+client = Client()
+response = client.flash("Explain the difference between REST and GraphQL in simple terms.")
 
 print(response.text)
 print(response.provider)
 print(response.model_used)
+print(response.route_reason)
 ```
 
-Alias `ask()` juga tersedia:
+`ask()` is available as a convenience alias:
 
 ```python
-response = client.ask("Apa itu Python?")
+response = client.ask("What is Python?")
+```
+
+## Core Features
+
+- Canonical provider architecture with `flash` and `deepseek`
+- Safer `POST`-based transport with timeout handling
+- Configurable retry logic with backoff and jitter
+- Optional provider fallback
+- Structured output parsing with lightweight schemas
+- Tavily-powered skills for `search`, `extract`, and `crawl`
+- Automatic or manual skill usage for grounded answers
+- Clean response objects with routing, retry, latency, and skill metadata
+
+## Usage
+
+### Basic Usage
+
+```python
+from javaxFlash import Client
+
+client = Client()
+response = client.flash("Summarize the purpose of retry logic in API clients.")
+
 print(response.text)
 ```
 
-## Cara Kerja Singkat
+### Provider Selection
 
-Secara default, `FlashClient` akan:
-
-1. menerima prompt dari user
-2. memilih provider berdasarkan mode atau auto routing
-3. mengirim request ke endpoint provider
-4. mengembalikan hasil dalam bentuk `FlashResponse`
-
-Kalau provider utama gagal dan fallback aktif, client akan mencoba provider cadangan.
-
-## Memilih Provider
-
-### 1. Auto routing
-
-Auto routing cocok kalau kamu ingin library memilih provider secara otomatis.
+Let the router decide:
 
 ```python
-response = client.flash("Bandingkan REST dan GraphQL untuk project kecil", auto_route=True)
+response = client.flash("What is Python used for?")
+print(response.provider)
 ```
 
-### 2. Fast mode
-
-Gunakan saat ingin jawaban cepat.
+Force a provider:
 
 ```python
-response = client.flash("Apa itu Python?", mode="fast")
+response = client.flash("Use the flash provider.", provider="flash")
+response = client.flash("Analyze this architecture tradeoff.", provider="deepseek")
 ```
 
-### 3. Reasoning mode
-
-Gunakan saat prompt butuh analisis lebih dalam.
+Use routing modes:
 
 ```python
-response = client.flash("Kenapa algoritma ini gagal dan bagaimana cara debug-nya?", mode="reasoning")
+fast = client.flash("Summarize HTTP status codes.", mode="fast")
+reasoning = client.flash("Compare monolith vs microservices for a growing SaaS.", mode="reasoning")
 ```
 
-### 4. Paksa provider tertentu
+Backward compatibility note: `provider="gemini"` is still accepted and resolves to `flash`.
 
-Kalau kamu sudah tahu provider mana yang ingin dipakai:
-
-```python
-response = client.flash("Gunakan provider cepat", provider="flash")
-response = client.flash("Analisis bug ini", provider="deepseek")
-```
-
-## Konfigurasi Dasar
-
-Kalau ingin mengubah perilaku default client:
+### Retry Configuration
 
 ```python
-from javaxFlash import FlashClient, FlashConfig
+from javaxFlash import Client, Config, RetryExhaustedError, TimeoutError
 
-config = FlashConfig(
-    timeout=30.0,
-    auto_route=True,
+config = Config(
+    timeout=20.0,
+    max_retries=3,
+    backoff_base=0.5,
+    backoff_multiplier=2.0,
+    backoff_max=8.0,
+    jitter=0.2,
     fallback_enabled=True,
-    default_system_instruction="You are javaxFlash, a concise and practical AI assistant.",
 )
 
-client = FlashClient(config=config)
+client = Client(config)
+
+try:
+    response = client.flash("Summarize retry strategies for HTTP clients.")
+    print(response.text)
+    print(response.retry_count)
+except (TimeoutError, RetryExhaustedError) as exc:
+    print(exc)
 ```
 
-Field config yang paling sering dipakai:
+### Tool Usage
 
-- `timeout`: timeout request HTTP
-- `auto_route`: aktif/nonaktif routing otomatis
-- `fallback_enabled`: coba provider cadangan saat request gagal
-- `default_system_instruction`: system prompt default
-- `default_gemini_model`: nama model untuk provider `flash`
-- `deepseek_temperature`: temperature default untuk DeepSeek
-- `debug`: tampilkan log sederhana saat development
-- `request_logging`: aktifkan logging request
+The tool system is designed to support the AI response, not replace it. Tool data is cleaned internally and injected into the model prompt as grounding context. Users receive a normal AI answer, not raw tool output objects.
 
-## Custom System Instruction
+#### Automatic Skill Usage
 
-Kamu bisa memberi system instruction per request:
+```python
+from javaxFlash import Client, Config
+
+client = Client(
+    Config(
+        tavily_api_key="your-tavily-api-key",
+        auto_search=True,
+    )
+)
+
+response = client.flash("What is the latest Python release?")
+
+print(response.text)
+print(response.search_used)
+print(response.search_query)
+```
+
+#### Manual Skill Usage
+
+Force specific skills when you want grounded answers:
 
 ```python
 response = client.flash(
-    "Bantu saya menyusun rencana automation",
-    system_instruction="You are an AI assistant focused on backend automation and practical implementation.",
+    "What changed in the latest Python release?",
+    skills="search",
 )
 ```
 
-Atau menjadikannya default lewat `FlashConfig`.
+```python
+response = client.flash(
+    "Summarize this page: https://docs.python.org/3/whatsnew/",
+    skills=["extract"],
+)
+```
 
-## Response Object
+```python
+response = client.flash(
+    "Crawl docs from https://docs.example.com/retries and summarize the guidance.",
+    skills=["crawl"],
+    crawl_instructions="Focus on retry recommendations and edge cases.",
+)
+```
 
-Setiap request mengembalikan `FlashResponse` dengan struktur yang konsisten:
+Supported skills in `v3.0.0`:
+
+- `search`
+- `extract`
+- `crawl`
+
+Important behavior:
+
+- Skill output is cleaned before it is used
+- Raw `ToolResult(...)` objects are not returned from `flash(...)`
+- Manual and automatic skill usage both produce a final AI answer
+
+### Structured Output
+
+Use a lightweight schema when you want predictable JSON-shaped output.
+
+```python
+from javaxFlash import Client, JsonSchema
+
+task_schema = JsonSchema(
+    name="task_summary",
+    fields={
+        "title": str,
+        "priority": str,
+        "action_items": [str],
+    },
+)
+
+client = Client()
+response = client.flash(
+    "Turn this into a compact task plan for backend cleanup.",
+    schema=task_schema,
+)
+
+print(response.structured_output)
+```
+
+You can also use a dataclass:
+
+```python
+from dataclasses import dataclass
+from javaxFlash import Client
+
+@dataclass
+class TicketSummary:
+    title: str
+    priority: str
+
+client = Client()
+response = client.flash("Summarize this bug report.", schema=TicketSummary)
+
+print(response.structured_output.title)
+```
+
+## Configuration Guide
+
+Common configuration fields:
+
+- `timeout`
+- `max_retries`
+- `backoff_base`
+- `backoff_multiplier`
+- `backoff_max`
+- `jitter`
+- `retry_status_codes`
+- `default_provider`
+- `default_model`
+- `provider_models`
+- `fallback_enabled`
+- `fallback_provider`
+- `auto_route`
+- `debug`
+- `capture_raw_response`
+- `auto_search`
+- `tavily_api_key`
+- `search_tool_name`
+- `search_max_results`
+- `search_timeout`
+
+Example:
+
+```python
+from javaxFlash import Client, Config
+
+config = Config(
+    timeout=15.0,
+    max_retries=2,
+    default_provider="flash",
+    fallback_enabled=True,
+    fallback_provider="deepseek",
+    auto_search=False,
+    tavily_api_key="your-tavily-api-key",
+)
+
+client = Client(config)
+```
+
+### Environment Variables
+
+Environment-based configuration is optional:
+
+```python
+from javaxFlash import Config
+
+config = Config.from_env()
+```
+
+Supported environment variables include:
+
+- `JAVAXFLASH_TIMEOUT`
+- `JAVAXFLASH_MAX_RETRIES`
+- `JAVAXFLASH_BACKOFF_BASE`
+- `JAVAXFLASH_BACKOFF_MULTIPLIER`
+- `JAVAXFLASH_BACKOFF_MAX`
+- `JAVAXFLASH_JITTER`
+- `JAVAXFLASH_DEFAULT_PROVIDER`
+- `JAVAXFLASH_DEFAULT_MODEL`
+- `JAVAXFLASH_FALLBACK_PROVIDER`
+- `JAVAXFLASH_PROVIDER_MODELS`
+- `JAVAXFLASH_AUTO_ROUTE`
+- `JAVAXFLASH_AUTO_SEARCH`
+- `JAVAXFLASH_TAVILY_API_KEY`
+- `JAVAXFLASH_SEARCH_TOOL_NAME`
+- `JAVAXFLASH_SEARCH_MAX_RESULTS`
+- `JAVAXFLASH_SEARCH_TIMEOUT`
+- `JAVAXFLASH_DEBUG`
+
+## Response Model
+
+Each request returns `FlashResponse`:
 
 ```python
 response.text
-response.model_used
 response.provider
-response.raw
+response.model_used
 response.route_reason
-response.error
+response.retry_count
+response.latency_ms
+response.raw
+response.structured_output
+response.search_used
+response.search_query
+response.search_summary
+response.skills_used
+response.skills_summary
 ```
 
-Penjelasan singkat:
+`raw` is only included when `capture_raw_response=True` or `include_raw=True`.
 
-- `text`: isi jawaban utama
-- `model_used`: nama model yang dilaporkan provider
-- `provider`: provider yang benar-benar dipakai
-- `raw`: payload JSON mentah dari endpoint
-- `route_reason`: alasan routing yang dipilih client
-- `error`: pesan error jika request gagal
+## Error Handling
 
-Contoh:
+Library-specific exceptions:
+
+- `ProviderError`
+- `TimeoutError`
+- `RetryExhaustedError`
+- `SchemaValidationError`
+- `ToolExecutionError`
+
+Typical example:
 
 ```python
-response = client.flash("Jelaskan recursion")
+from javaxFlash import Client, ToolExecutionError
 
-if response.error:
-    print("Error:", response.error)
-else:
+client = Client()
+
+try:
+    response = client.flash("What is the latest Python release?", skills="search")
     print(response.text)
-    print("Provider:", response.provider)
-    print("Reason:", response.route_reason)
+except ToolExecutionError as exc:
+    print(exc)
 ```
 
-## Parameter yang Bisa Dipakai Saat Request
+## Best Practices
 
-API utama:
+- Use `auto_search=True` only when you want lightweight web grounding for freshness-sensitive prompts.
+- Use manual `skills=` when you know the answer should be grounded by search, extraction, or crawling.
+- Keep schemas small and explicit for the best structured-output reliability.
+- Enable `capture_raw_response` only for debugging or diagnostics.
+- Prefer provider forcing only when you have a clear reason; otherwise let routing do the work.
 
-```python
-client.flash(
-    prompt,
-    mode=None,
-    provider=None,
-    auto_route=None,
-    system_instruction=None,
-    fallback_provider=None,
-    **kwargs,
-)
-```
+## Limitations
 
-Parameter penting:
+- Synchronous only in `v3.0.0`
+- No streaming support
+- No async API
+- No chat history or memory layer
+- Tooling is currently Tavily-focused and limited to `search`, `extract`, and `crawl`
+- Output quality still depends on upstream model and search provider behavior
 
-- `prompt`: isi permintaan user
-- `mode`: `fast` atau `reasoning`
-- `provider`: paksa provider tertentu
-- `auto_route`: override perilaku routing default
-- `system_instruction`: system instruction per request
-- `fallback_provider`: provider cadangan jika request utama gagal
-- `**kwargs`: parameter tambahan yang diteruskan ke provider
+## Examples
 
-Contoh `kwargs`:
+Working examples are provided in:
 
-```python
-response = client.flash(
-    "Jelaskan greedy algorithm",
-    provider="deepseek",
-    temperature=0.2,
-)
-```
+- `examples/basic_usage.py`
+- `examples/provider_selection.py`
+- `examples/retry_config.py`
+- `examples/structured_output.py`
+- `examples/tavily_search.py`
 
-## Menjalankan Contoh Interaktif
+## Testing
 
-Contoh interaktif ada di `examples/basic_usage.py`.
-
-Jalankan dengan:
+Run the test suite:
 
 ```bash
-python examples/basic_usage.py
+./.venv/bin/pytest -q
 ```
 
-atau:
+## Version
 
-```bash
-python -m examples.basic_usage
-```
-
-## Struktur Project
-
-File yang paling penting:
-
-- `javaxFlash/client.py`: entry point utama library
-- `javaxFlash/config.py`: konfigurasi client
-- `javaxFlash/router.py`: logika pemilihan provider
-- `javaxFlash/providers.py`: implementasi request ke provider
-- `javaxFlash/models.py`: model respons
-
-## Catatan Penting
-
-- `flash` di library ini adalah nama provider cepat yang dibacking oleh endpoint Gemini Lite.
-- `deepseek` dipakai untuk prompt yang lebih berat atau mode reasoning.
-- Output akhir tetap bergantung pada endpoint upstream yang dipanggil library ini.
-- Library ini sekarang stateless; tidak ada fitur memory atau penyimpanan percakapan lokal.
-
-## Minimal Example
-
-Kalau ingin contoh paling ringkas untuk dipakai di project lain:
-
-```python
-from javaxFlash import FlashClient
-
-client = FlashClient()
-response = client.flash("Buat ringkasan tentang REST API", mode="fast")
-
-if response.error:
-    raise RuntimeError(response.error)
-
-print(response.text)
-```
+This release is aligned with `v3.0.0`.

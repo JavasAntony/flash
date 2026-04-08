@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "javaxFlash"
-version = "2.1.0"
-description = "Lightweight local-first AI router with javaxFlash and DeepSeek."
+version = "3.0.0"
+description = "Lightweight Python AI client/router with clean provider architecture, retries, and structured output."
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -14,10 +14,11 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.31.0",
+  "tavily-python>=0.7.0",
 ]
-keywords = ["ai", "client", "router", "gemini", "deepseek"]
+keywords = ["ai", "client", "router", "sdk", "gemini", "deepseek"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -26,8 +27,16 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0",
+]
+
 [tool.setuptools]
 packages = ["javaxFlash"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.urls]
 "Homepage" = "https://pypi.org/project/javaxFlash/"

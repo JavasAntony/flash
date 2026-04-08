@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .config import normalize_provider_name
 
 
 @dataclass(slots=True)
 class RouteDecision:
     provider: str
     reason: str
+    score: int = 0
+    signals: tuple[str, ...] = field(default_factory=tuple)
 
 
 class FlashRouter:
@@ -14,6 +18,7 @@ class FlashRouter:
         "debug",
         "bug",
         "error",
+        "traceback",
         "reasoning",
         "step-by-step",
         "step by step",
@@ -30,9 +35,6 @@ class FlashRouter:
         "mengapa",
         "refactor",
         "algorithm",
-        "infinite loop",
-        "q-learning",
-        "rl",
         "root cause",
     }
     SIMPLE_PREFIXES = (
@@ -42,10 +44,22 @@ class FlashRouter:
         "when ",
         "where ",
         "define ",
-        "jelaskan singkat",
         "summarize ",
         "ringkas ",
     )
+
+    def __init__(
+        self,
+        *,
+        complex_keywords: set[str] | None = None,
+        simple_prefixes: tuple[str, ...] | None = None,
+        quick_prompt_word_limit: int = 12,
+        short_question_word_limit: int = 20,
+    ):
+        self.complex_keywords = complex_keywords or self.COMPLEX_KEYWORDS
+        self.simple_prefixes = simple_prefixes or self.SIMPLE_PREFIXES
+        self.quick_prompt_word_limit = quick_prompt_word_limit
+        self.short_question_word_limit = short_question_word_limit
 
     def choose(
         self,
@@ -55,46 +69,74 @@ class FlashRouter:
         auto_route: bool = True,
         default_provider: str = "flash",
     ) -> RouteDecision:
-        if forced_provider == "flash":
-            forced_provider = "gemini"
-
         if forced_provider:
+            canonical_provider = normalize_provider_name(forced_provider)
             return RouteDecision(
-                provider=forced_provider,
-                reason=f"provider forced explicitly: {forced_provider}",
+                provider=canonical_provider,
+                reason=f"provider forced explicitly: {canonical_provider}",
             )
+
+        normalized_prompt = prompt.strip().lower()
+        normalized_default = normalize_provider_name(default_provider)
 
         if mode == "reasoning":
-            return RouteDecision(provider="deepseek", reason="reasoning mode requested")
-        if mode == "fast":
-            return RouteDecision(provider="gemini", reason="fast mode requested (Flash)")
-
-        if not auto_route:
-            resolved = "gemini" if default_provider == "flash" else default_provider
-            return RouteDecision(
-                provider=resolved,
-                reason=f"auto routing disabled, using default provider {default_provider}",
-            )
-
-        normalized = prompt.strip().lower()
-        if any(token in normalized for token in self.COMPLEX_KEYWORDS):
             return RouteDecision(
                 provider="deepseek",
-                reason="prompt contains complex reasoning/debugging keywords",
+                reason="reasoning mode requested",
             )
-        if len(normalized.split()) <= 12 or normalized.startswith(self.SIMPLE_PREFIXES):
+        if mode == "fast":
             return RouteDecision(
-                provider="gemini",
-                reason="prompt looks short or fact-oriented",
+                provider="flash",
+                reason="fast mode requested",
             )
-        if "?" in normalized and len(normalized.split()) <= 20:
+
+        if not auto_route:
             return RouteDecision(
-                provider="gemini",
-                reason="prompt looks like a quick question",
+                provider=normalized_default,
+                reason=f"auto routing disabled, using default provider {normalized_default}",
             )
+
+        signals: list[str] = []
+        score = 0
+
+        if any(token in normalized_prompt for token in self.complex_keywords):
+            score += 2
+            signals.append("complex keyword match")
+
+        word_count = len(normalized_prompt.split())
+        if word_count >= 40:
+            score += 1
+            signals.append("long prompt")
+
+        if any(marker in normalized_prompt for marker in ("```", "stack", "exception", "latency")):
+            score += 1
+            signals.append("engineering-heavy prompt")
+
+        if normalized_prompt.startswith(self.simple_prefixes):
+            score -= 1
+            signals.append("simple prompt prefix")
+
+        if word_count <= self.quick_prompt_word_limit:
+            score -= 1
+            signals.append("short prompt")
+
+        if "?" in normalized_prompt and word_count <= self.short_question_word_limit:
+            score -= 1
+            signals.append("quick question")
+
+        if score >= 2:
+            return RouteDecision(
+                provider="deepseek",
+                reason="auto route selected deepseek for a more complex prompt",
+                score=score,
+                signals=tuple(signals),
+            )
+
         return RouteDecision(
-            provider="deepseek",
-            reason="defaulted to deeper reasoning for broader prompt",
+            provider="flash",
+            reason="auto route selected flash for a lighter or direct prompt",
+            score=score,
+            signals=tuple(signals),
         )
 
 
