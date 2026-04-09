@@ -1,25 +1,42 @@
-# JavaxFlash v3.0.0
+# JavaxFlash v4.0.0
 
-`JavaxFlash` is a lightweight Python AI client and router for multi-provider prompt workflows. It keeps the public API small while providing stronger foundations for production use: configurable retries, cleaner routing, structured output parsing, and optional Tavily-backed web grounding.
+`JavaxFlash` is a small Python library for sending prompts to multiple AI providers through one consistent client API.
 
-## Overview
+It focuses on a few practical things:
 
-`JavaxFlash` is designed for developers who want:
+- simple `client.flash(...)` usage
+- lightweight provider routing between `flash` and `deepseek`
+- retry and fallback handling
+- structured output parsing
+- optional Tavily-backed `search` and `extract`
+- local tool injection
+- async support
+- lightweight session memory
 
-- one simple client for multiple AI providers
-- lightweight provider routing with sensible defaults
-- configurable retry and fallback behavior
-- optional grounded answers using Tavily skills
-- structured JSON-style output without a heavy framework
+This library is intentionally small. It does not include streaming, and it does not include agent mode in `v4.0.0`.
 
-The library is intentionally synchronous and compact in `v3.0.0`. It does not include streaming, chat memory, or async support in this release.
+## Who This Is For
+
+`JavaxFlash` fits best if you want:
+
+- one compact client for multiple providers
+- a cleaner wrapper around prompt calls
+- optional grounded answers with web search or extraction
+- structured JSON-like output without a large framework
+- a library that stays readable and easy to extend
 
 ## Installation
 
-Install the package locally:
+Install the package:
 
 ```bash
 pip install javaxflash
+```
+
+Optional for Tavily-based `search` and `extract`:
+
+```bash
+pip install tavily-python
 ```
 
 ## Quick Start
@@ -28,251 +45,163 @@ pip install javaxflash
 from javaxFlash import Client
 
 client = Client()
-response = client.flash("Explain the difference between REST and GraphQL in simple terms.")
+res = client.flash("Explain the difference between REST and GraphQL in simple terms.")
 
-print(response.text)
-print(response.provider)
-print(response.model_used)
-print(response.route_reason)
+print(res.text)
+print(res.provider)
+print(res.model)
+print(res.reason)
 ```
 
-`ask()` is available as a convenience alias:
+`ask()` is just an alias for `flash()`:
 
 ```python
-response = client.ask("What is Python?")
+res = client.ask("What is Python?")
 ```
 
-## Core Features
+## The Main Idea
 
-- Canonical provider architecture with `flash` and `deepseek`
-- Safer `POST`-based transport with timeout handling
-- Configurable retry logic with backoff and jitter
-- Optional provider fallback
-- Structured output parsing with lightweight schemas
-- Tavily-powered skills for `search`, `extract`, and `crawl`
-- Automatic or manual skill usage for grounded answers
-- Clean response objects with routing, retry, latency, and skill metadata
+Most users only need this mental model:
 
-## Usage
+1. Create `Client()`
+2. Call `client.flash(...)`
+3. Optionally add `provider=`, `schema=`, `skills=`, or `tool_calls=`
+4. Read `res.text` or `res.data`
 
-### Basic Usage
+If you start there, the rest of the library feels much simpler.
+
+## Core API
+
+### `Client`
+
+Main sync client.
 
 ```python
 from javaxFlash import Client
 
 client = Client()
-response = client.flash("Summarize the purpose of retry logic in API clients.")
-
-print(response.text)
+res = client.flash("Summarize retry logic in API clients.")
+print(res.text)
 ```
 
-### Provider Selection
+### `AsyncClient`
 
-Let the router decide:
+Async wrapper for the same API.
 
 ```python
-response = client.flash("What is Python used for?")
-print(response.provider)
+import asyncio
+from javaxFlash import AsyncClient
+
+
+async def main() -> None:
+    client = AsyncClient()
+    res = await client.flash("Explain exponential backoff simply.")
+    print(res.text)
+
+
+asyncio.run(main())
+```
+
+### `Session`
+
+Simple short-term conversation history.
+
+```python
+from javaxFlash import Client
+
+client = Client()
+session = client.session(max_turns=6)
+
+session.ask("My product is a Python SDK for AI providers.")
+res = session.ask("Give me three tagline ideas.")
+print(res.text)
+```
+
+## Providers
+
+Built-in providers:
+
+- `flash`
+- `deepseek`
+
+Let the router choose:
+
+```python
+res = client.flash("What is Python used for?")
+print(res.provider)
 ```
 
 Force a provider:
 
 ```python
-response = client.flash("Use the flash provider.", provider="flash")
-response = client.flash("Analyze this architecture tradeoff.", provider="deepseek")
+res = client.flash("Use the flash provider.", provider="flash")
+res = client.flash("Analyze this architecture tradeoff.", provider="deepseek")
 ```
 
-Use routing modes:
+Routing modes:
 
 ```python
 fast = client.flash("Summarize HTTP status codes.", mode="fast")
-reasoning = client.flash("Compare monolith vs microservices for a growing SaaS.", mode="reasoning")
+reasoning = client.flash("Compare monolith vs microservices.", mode="reasoning")
 ```
 
-Backward compatibility note: `provider="gemini"` is still accepted and resolves to `flash`.
+Compatibility note:
 
-### Retry Configuration
+- `provider="gemini"` is accepted and mapped to `flash`
+
+## Configuration
+
+Use `Config` when you want to control timeout, retries, fallback, search settings, or hooks.
 
 ```python
-from javaxFlash import Client, Config, RetryExhaustedError, TimeoutError
+from javaxFlash import Client, Config
 
-config = Config(
+cfg = Config(
     timeout=20.0,
-    max_retries=3,
-    backoff_base=0.5,
-    backoff_multiplier=2.0,
+    retries=3,
+    backoff=0.5,
+    backoff_rate=2.0,
     backoff_max=8.0,
     jitter=0.2,
-    fallback_enabled=True,
+    fallback=True,
 )
 
-client = Client(config)
-
-try:
-    response = client.flash("Summarize retry strategies for HTTP clients.")
-    print(response.text)
-    print(response.retry_count)
-except (TimeoutError, RetryExhaustedError) as exc:
-    print(exc)
+client = Client(cfg=cfg)
 ```
 
-### Tool Usage
-
-The tool system is designed to support the AI response, not replace it. Tool data is cleaned internally and injected into the model prompt as grounding context. Users receive a normal AI answer, not raw tool output objects.
-
-#### Automatic Skill Usage
-
-```python
-from javaxFlash import Client, Config
-
-client = Client(
-    Config(
-        tavily_api_key="your-tavily-api-key",
-        auto_search=True,
-    )
-)
-
-response = client.flash("What is the latest Python release?")
-
-print(response.text)
-print(response.search_used)
-print(response.search_query)
-```
-
-#### Manual Skill Usage
-
-Force specific skills when you want grounded answers:
-
-```python
-response = client.flash(
-    "What changed in the latest Python release?",
-    skills="search",
-)
-```
-
-```python
-response = client.flash(
-    "Summarize this page: https://docs.python.org/3/whatsnew/",
-    skills=["extract"],
-)
-```
-
-```python
-response = client.flash(
-    "Crawl docs from https://docs.example.com/retries and summarize the guidance.",
-    skills=["crawl"],
-    crawl_instructions="Focus on retry recommendations and edge cases.",
-)
-```
-
-Supported skills in `v3.0.0`:
-
-- `search`
-- `extract`
-- `crawl`
-
-Important behavior:
-
-- Skill output is cleaned before it is used
-- Raw `ToolResult(...)` objects are not returned from `flash(...)`
-- Manual and automatic skill usage both produce a final AI answer
-
-### Structured Output
-
-Use a lightweight schema when you want predictable JSON-shaped output.
-
-```python
-from javaxFlash import Client, JsonSchema
-
-task_schema = JsonSchema(
-    name="task_summary",
-    fields={
-        "title": str,
-        "priority": str,
-        "action_items": [str],
-    },
-)
-
-client = Client()
-response = client.flash(
-    "Turn this into a compact task plan for backend cleanup.",
-    schema=task_schema,
-)
-
-print(response.structured_output)
-```
-
-You can also use a dataclass:
-
-```python
-from dataclasses import dataclass
-from javaxFlash import Client
-
-@dataclass
-class TicketSummary:
-    title: str
-    priority: str
-
-client = Client()
-response = client.flash("Summarize this bug report.", schema=TicketSummary)
-
-print(response.structured_output.title)
-```
-
-## Configuration Guide
-
-Common configuration fields:
+Common fields:
 
 - `timeout`
-- `max_retries`
-- `backoff_base`
-- `backoff_multiplier`
+- `retries`
+- `backoff`
+- `backoff_rate`
 - `backoff_max`
 - `jitter`
-- `retry_status_codes`
-- `default_provider`
-- `default_model`
-- `provider_models`
-- `fallback_enabled`
+- `retry_codes`
+- `provider`
+- `model`
+- `models`
+- `fallback`
 - `fallback_provider`
 - `auto_route`
-- `debug`
-- `capture_raw_response`
+- `raw`
 - `auto_search`
-- `tavily_api_key`
-- `search_tool_name`
-- `search_max_results`
+- `auto_tools`
+- `tavily_key`
+- `search_tool`
+- `search_limit`
 - `search_timeout`
+- `hooks`
 
-Example:
-
-```python
-from javaxFlash import Client, Config
-
-config = Config(
-    timeout=15.0,
-    max_retries=2,
-    default_provider="flash",
-    fallback_enabled=True,
-    fallback_provider="deepseek",
-    auto_search=False,
-    tavily_api_key="your-tavily-api-key",
-)
-
-client = Client(config)
-```
-
-### Environment Variables
-
-Environment-based configuration is optional:
+Environment-based config is also supported:
 
 ```python
 from javaxFlash import Config
 
-config = Config.from_env()
+cfg = Config.from_env()
 ```
 
-Supported environment variables include:
+Useful environment variables:
 
 - `JAVAXFLASH_TIMEOUT`
 - `JAVAXFLASH_MAX_RETRIES`
@@ -290,89 +219,285 @@ Supported environment variables include:
 - `JAVAXFLASH_SEARCH_TOOL_NAME`
 - `JAVAXFLASH_SEARCH_MAX_RESULTS`
 - `JAVAXFLASH_SEARCH_TIMEOUT`
-- `JAVAXFLASH_DEBUG`
 
-## Response Model
-
-Each request returns `FlashResponse`:
+## Retries And Fallback
 
 ```python
-response.text
-response.provider
-response.model_used
-response.route_reason
-response.retry_count
-response.latency_ms
-response.raw
-response.structured_output
-response.search_used
-response.search_query
-response.search_summary
-response.skills_used
-response.skills_summary
+from javaxFlash import Client, Config, RetryError, TimeoutError
+
+client = Client(
+    cfg=Config(
+        timeout=20.0,
+        retries=3,
+        fallback=True,
+    )
+)
+
+try:
+    res = client.flash("Summarize retry strategies for HTTP clients.")
+    print(res.text)
+    print(res.retries)
+except (TimeoutError, RetryError) as err:
+    print(err)
 ```
 
-`raw` is only included when `capture_raw_response=True` or `include_raw=True`.
+Fallback is provider-level. If the chosen provider fails and fallback is enabled, the client can retry the request on another provider.
 
-## Error Handling
+## Structured Output
 
-Library-specific exceptions:
+Use `Schema` or a dataclass when you want parsed output in `res.data`.
 
-- `ProviderError`
-- `TimeoutError`
-- `RetryExhaustedError`
-- `SchemaValidationError`
-- `ToolExecutionError`
-
-Typical example:
+### With `Schema`
 
 ```python
-from javaxFlash import Client, ToolExecutionError
+from javaxFlash import Client, Schema
+
+task_schema = Schema(
+    name="task_summary",
+    fields={
+        "title": str,
+        "priority": str,
+        "items": [str],
+    },
+)
+
+client = Client()
+res = client.flash(
+    "Turn this into a compact task plan.",
+    schema=task_schema,
+)
+
+print(res.data)
+```
+
+### With a dataclass
+
+```python
+from dataclasses import dataclass
+from javaxFlash import Client
+
+
+@dataclass
+class Ticket:
+    title: str
+    priority: str
+
+
+client = Client()
+res = client.flash("Summarize this bug report.", schema=Ticket)
+print(res.data.title)
+```
+
+Supported schema shapes include:
+
+- basic Python types
+- lists such as `[str]`
+- `Enum`
+- `Literal`
+- optional values such as `str | None`
+- dataclass defaults
+
+Important note:
+
+- structured output depends on the upstream model actually returning valid JSON
+- if the provider returns invalid JSON, `SchemaError` is raised
+
+## Tools And Skills
+
+There are two different concepts:
+
+### 1. Local tools
+
+These are Python functions you register yourself.
+
+```python
+from javaxFlash import Client
+
+client = Client()
+
+client.register_function(
+    "project_context",
+    lambda: {
+        "title": "Library focus",
+        "content": "This SDK focuses on multi-provider routing, retries, and structured output.",
+    },
+)
+
+res = client.flash(
+    "Write a short project summary.",
+    tool_calls={"project_context": {}},
+)
+
+print(res.text)
+print(res.tools)
+```
+
+### 2. Skills
+
+Skills are built-in prompt-grounding helpers currently backed by Tavily:
+
+- `search`
+- `extract`
+
+Manual skill usage:
+
+```python
+from javaxFlash import Client, Config
+
+client = Client(cfg=Config(tavily_key="your-tavily-api-key"))
+
+res = client.flash(
+    "What changed in the latest Python release?",
+    skills="search",
+)
+
+print(res.text)
+print(res.searched)
+print(res.search_query)
+```
+
+```python
+res = client.flash(
+    "Summarize this page: https://docs.python.org/3/whatsnew/",
+    skills=["extract"],
+)
+```
+
+Direct tool-style helpers are also available:
+
+```python
+client.use_tavily()
+
+print(client.search("latest Python release", limit=3))
+print(client.extract("https://docs.python.org/3/whatsnew/"))
+```
+
+Important behavior:
+
+- `flash()` does not automatically run search by default
+- manual `skills="search"` and `skills=["extract"]` are supported
+- `use_search=True` is also supported for explicit search usage
+- tool output is injected as context, and the returned result is still a normal AI response
+- raw `ToolRes(...)` objects are not returned from `flash(...)`
+
+`auto_search` and `auto_tools` exist for opt-in behavior, but for most users explicit skill usage is clearer and safer.
+
+## Observability Hooks
+
+You can listen to client events through `hooks`.
+
+```python
+from javaxFlash import Client, Config
+
+
+def log_event(event: str, payload: dict) -> None:
+    print(event, payload)
+
+
+client = Client(cfg=Config(hooks=(log_event,)))
+res = client.flash("Summarize HTTP retries.")
+```
+
+Common emitted events include:
+
+- `flash_requested`
+- `tool_called`
+- `fallback_triggered`
+- `response_received`
+
+## Response Object
+
+Each request returns `Res`.
+
+Common fields:
+
+```python
+res.text
+res.provider
+res.model
+res.reason
+res.retries
+res.latency
+res.data
+res.skills
+res.tools
+res.searched
+res.search_query
+res.search_note
+res.skill_note
+res.think
+res.caps
+```
+
+`res.raw` is included only when `raw=True`.
+
+`res.think` is populated when a provider response contains a hidden `<thinking>...</thinking>` section and a clean final answer outside it.
+
+## Errors
+
+Main exceptions:
+
+- `ProviderError`
+- `MissingProviderError`
+- `TimeoutError`
+- `RetryError`
+- `SchemaError`
+- `ToolError`
+
+Example:
+
+```python
+from javaxFlash import Client, ToolError
 
 client = Client()
 
 try:
-    response = client.flash("What is the latest Python release?", skills="search")
-    print(response.text)
-except ToolExecutionError as exc:
-    print(exc)
+    res = client.flash("What is the latest Python release?", skills="search")
+    print(res.text)
+except ToolError as err:
+    print(err)
 ```
-
-## Best Practices
-
-- Use `auto_search=True` only when you want lightweight web grounding for freshness-sensitive prompts.
-- Use manual `skills=` when you know the answer should be grounded by search, extraction, or crawling.
-- Keep schemas small and explicit for the best structured-output reliability.
-- Enable `capture_raw_response` only for debugging or diagnostics.
-- Prefer provider forcing only when you have a clear reason; otherwise let routing do the work.
-
-## Limitations
-
-- Synchronous only in `v3.0.0`
-- No streaming support
-- No async API
-- No chat history or memory layer
-- Tooling is currently Tavily-focused and limited to `search`, `extract`, and `crawl`
-- Output quality still depends on upstream model and search provider behavior
 
 ## Examples
 
-Working examples are provided in:
+Available examples:
 
 - `examples/basic_usage.py`
 - `examples/provider_selection.py`
 - `examples/retry_config.py`
 - `examples/structured_output.py`
 - `examples/tavily_search.py`
+- `examples/tool_registration.py`
+
+Note for new users:
+
+- examples are meant to be run from the repository root
+- examples that use real providers depend on network access
+- Tavily examples also require `tavily-python` and a valid Tavily API key
+- some structured-output examples may fail if the upstream provider does not return valid JSON for that prompt
 
 ## Testing
 
-Run the test suite:
+Run tests:
 
 ```bash
 ./.venv/bin/pytest -q
 ```
 
+Quick syntax check:
+
+```bash
+python3 -m compileall javaxFlash tests examples
+```
+
+## Limitations
+
+- no streaming support
+- no built-in agent mode
+- output quality still depends on upstream providers
+- structured output reliability depends on model compliance
+- Tavily-backed features require extra dependency and API access
+
 ## Version
 
-This release is aligned with `v3.0.0`.
+Current version: `4.0.0`
