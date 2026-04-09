@@ -1,53 +1,32 @@
-from .client import AIClient, FlashClient
-from .config import AIClientConfig, FlashConfig
-from .errors import (
-    FlashError,
-    ProviderError,
-    ProviderNotFoundError,
-    RetryExhaustedError,
-    SchemaValidationError,
-    TimeoutError,
-    ToolExecutionError,
-)
-from .models import AIResponse, FlashResponse
+from .client import AsyncClient, AsyncSession, Client, Session
+from .config import Config
+from .errors import AppError, MissingProviderError, ProviderError, RetryError, SchemaError, TimeoutError, ToolError
+from .models import Caps, Req, Res
 from .schema import Schema
-from .tools import (
-    BaseTool,
-    TavilyTool,
-    Tool,
-    ToolRegistry,
-    ToolResult,
-)
+from .tools import FuncTool, Tavily, Tool, ToolMap, ToolRes
 
-__version__ = "3.0.0"
-
-Client = FlashClient
-Config = FlashConfig
-Response = FlashResponse
-JsonSchema = Schema
+__version__ = "4.0.0"
 
 __all__ = [
-    "AIClient",
-    "AIClientConfig",
-    "AIResponse",
-    "BaseTool",
+    "AppError",
+    "AsyncClient",
+    "AsyncSession",
+    "Caps",
     "Client",
     "Config",
-    "FlashClient",
-    "FlashConfig",
-    "FlashError",
-    "FlashResponse",
-    "JsonSchema",
+    "FuncTool",
+    "MissingProviderError",
     "ProviderError",
-    "ProviderNotFoundError",
-    "Response",
-    "RetryExhaustedError",
+    "Req",
+    "Res",
+    "RetryError",
     "Schema",
-    "SchemaValidationError",
-    "TavilyTool",
+    "SchemaError",
+    "Session",
+    "Tavily",
     "TimeoutError",
     "Tool",
-    "ToolExecutionError",
-    "ToolRegistry",
-    "ToolResult",
+    "ToolError",
+    "ToolMap",
+    "ToolRes",
 ]

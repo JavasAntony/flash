@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import os
 from typing import Any, Callable
 
-from .errors import ToolExecutionError
+from .errors import ToolError
 
 try:
     from tavily import TavilyClient
@@ -14,236 +14,238 @@ except ImportError:  # pragma: no cover
 
 
 @dataclass(slots=True)
-class ToolResult:
-    tool_name: str
-    output: list[dict[str, Any]]
-    metadata: dict[str, Any] = field(default_factory=dict)
+class ToolRes:
+    name: str
+    items: list[dict[str, Any]]
+    meta: dict[str, Any] = field(default_factory=dict)
 
-    def as_prompt_context(self, heading: str) -> str:
-        lines = [heading]
-        answer = str(self.metadata.get("answer") or "").strip()
-        if answer:
-            lines.append(f"Overview: {answer}")
-        for index, item in enumerate(self.output, start=1):
-            title = str(item.get("title", "")).strip() or f"Item {index}"
+    def as_text(self, head: str) -> str:
+        lines = [head]
+        note = str(self.meta.get("answer") or "").strip()
+        if note:
+            lines.append(f"Overview: {note}")
+        for i, item in enumerate(self.items, start=1):
+            title = str(item.get("title", "")).strip() or f"Item {i}"
             url = str(item.get("url", "")).strip()
-            content = str(item.get("content", "")).strip()
-            lines.append(f"{index}. {title}")
+            text = str(item.get("content", "")).strip()
+            lines.append(f"{i}. {title}")
             if url:
                 lines.append(f"   URL: {url}")
-            if content:
-                lines.append(f"   Content: {content}")
+            if text:
+                lines.append(f"   Content: {text}")
         return "\n".join(lines)
 
 
-class BaseTool(ABC):
+class Tool(ABC):
     name: str
-    description: str = ""
+    desc: str = ""
 
     @abstractmethod
-    def run(self, **kwargs: Any) -> ToolResult:
+    def run(self, **kwargs: Any) -> ToolRes:
         raise NotImplementedError
 
 
-class TavilyTool(BaseTool):
+class FuncTool(Tool):
+    def __init__(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        desc: str = "",
+        fmt: Callable[[Any], list[dict[str, Any]]] | None = None,
+    ) -> None:
+        key = str(name).strip()
+        if not key:
+            raise ToolError("function tools must define a non-empty name")
+        self.name = key
+        self.desc = desc or f"Local callable tool '{key}'."
+        self.fn = fn
+        self.fmt = fmt
+
+    def run(self, **kwargs: Any) -> ToolRes:
+        try:
+            value = self.fn(**kwargs)
+        except Exception as err:
+            raise ToolError(f"tool '{self.name}' failed: {err}") from err
+        return ToolRes(name=self.name, items=self._items(value), meta={"kind": "function"})
+
+    def _items(self, value: Any) -> list[dict[str, Any]]:
+        if self.fmt is not None:
+            return self.fmt(value)
+        if isinstance(value, ToolRes):
+            return value.items
+        if isinstance(value, list):
+            out: list[dict[str, Any]] = []
+            for i, item in enumerate(value, start=1):
+                if isinstance(item, dict):
+                    out.append(item)
+                else:
+                    out.append({"title": f"Item {i}", "content": str(item)})
+            return out
+        if isinstance(value, dict):
+            return [value]
+        return [{"title": self.name, "content": str(value)}]
+
+
+class Tavily(Tool):
     name = "tavily"
-    description = "Tavily-backed support tool for search, extract, and crawl."
-    supported_skills = ("search", "extract", "crawl")
+    desc = "Tavily-backed support tool for search and extract."
+    skills = ("search", "extract")
 
     def __init__(
         self,
         api_key: str | None = None,
         *,
-        tavily_client: Any | None = None,
+        client: Any | None = None,
         topic: str = "general",
-        search_depth: str = "basic",
-        include_answer: bool = True,
-        include_raw_content: bool = False,
+        depth: str = "basic",
+        answer: bool = True,
+        raw: bool = False,
     ) -> None:
         self.api_key = api_key or os.getenv("TAVILY_API_KEY")
         self.topic = topic
-        self.search_depth = search_depth
-        self.include_answer = include_answer
-        self.include_raw_content = include_raw_content
-        self._client = tavily_client
+        self.depth = depth
+        self.answer = answer
+        self.raw = raw
+        self._client = client
 
     @property
     def client(self) -> Any:
         if self._client is None:
-            self._client = self._build_client()
+            self._client = self._build()
         return self._client
 
-    def search(self, query: str, limit: int = 5) -> ToolResult:
-        return self._invoke(
-            tool_name="search",
-            method=self.client.search,
-            normalizer=self._normalize_search,
+    def search(self, query: str, limit: int = 5) -> ToolRes:
+        return self._call(
+            name="search",
+            fn=self.client.search,
+            fmt=self._search_res,
             query=query,
             max_results=limit,
             topic=self.topic,
-            search_depth=self.search_depth,
-            include_answer=self.include_answer,
-            include_raw_content=self.include_raw_content,
+            search_depth=self.depth,
+            include_answer=self.answer,
+            include_raw_content=self.raw,
         )
 
-    def extract(self, url: str) -> ToolResult:
-        return self._invoke(
-            tool_name="extract",
-            method=self.client.extract,
-            normalizer=self._normalize_extract,
+    def extract(self, url: str) -> ToolRes:
+        return self._call(
+            name="extract",
+            fn=self.client.extract,
+            fmt=self._extract_res,
             urls=[url],
             include_images=False,
         )
 
-    def crawl(self, url: str, instructions: str | None = None) -> ToolResult:
-        payload: dict[str, Any] = {"url": url}
-        if instructions:
-            payload["instructions"] = instructions
-        return self._invoke(
-            tool_name="crawl",
-            method=self.client.crawl,
-            normalizer=self._normalize_crawl,
-            **payload,
-        )
-
-    def run(self, **kwargs: Any) -> ToolResult:
+    def run(self, **kwargs: Any) -> ToolRes:
         skill = str(kwargs.get("skill", "search")).strip().lower()
         if skill == "search":
             query = str(kwargs.get("query") or "").strip()
             if not query:
-                raise ToolExecutionError("search skill requires a non-empty query")
+                raise ToolError("search skill requires a non-empty query")
             return self.search(query=query, limit=int(kwargs.get("limit", 5)))
         if skill == "extract":
             url = str(kwargs.get("url") or "").strip()
             if not url:
-                raise ToolExecutionError("extract skill requires a URL")
+                raise ToolError("extract skill requires a URL")
             return self.extract(url)
-        if skill == "crawl":
-            url = str(kwargs.get("url") or "").strip()
-            if not url:
-                raise ToolExecutionError("crawl skill requires a URL")
-            return self.crawl(url, instructions=kwargs.get("instructions"))
-        raise ToolExecutionError(
-            f"unsupported Tavily skill '{skill}'. Supported skills: {', '.join(self.supported_skills)}"
-        )
+        raise ToolError(f"unsupported Tavily skill '{skill}'. Supported skills: {', '.join(self.skills)}")
 
-    def _build_client(self) -> Any:
+    def _build(self) -> Any:
         if TavilyClient is None:
-            raise ToolExecutionError(
-                "Tavily support requires the 'tavily-python' package. Install it with 'pip install tavily-python'."
-            )
+            raise ToolError("Tavily support requires the 'tavily-python' package. Install it with 'pip install tavily-python'.")
         if not self.api_key:
-            raise ToolExecutionError(
-                "Tavily requires an API key. Set TAVILY_API_KEY or pass api_key."
-            )
+            raise ToolError("Tavily requires an API key. Set TAVILY_API_KEY or pass api_key.")
         return TavilyClient(api_key=self.api_key)
 
-    def _invoke(
+    def _call(
         self,
-        tool_name: str,
-        method: Callable[..., Any],
-        normalizer: Callable[[Any], ToolResult],
-        **kwargs: Any,
-    ) -> ToolResult:
-        try:
-            response = method(**kwargs)
-        except Exception as exc:
-            raise ToolExecutionError(f"tavily {tool_name} failed: {exc}") from exc
-        return normalizer(response)
-
-    def _normalize_search(self, payload: Any) -> ToolResult:
-        data = self._as_dict(payload)
-        return ToolResult(
-            tool_name="search",
-            output=self._collect_items(data.get("results", []), content_keys=("content", "raw_content")),
-            metadata={
-                "query": data.get("query"),
-                "answer": data.get("answer"),
-                "response_time": data.get("response_time"),
-            },
-        )
-
-    def _normalize_extract(self, payload: Any) -> ToolResult:
-        data = self._as_dict(payload)
-        return ToolResult(
-            tool_name="extract",
-            output=self._collect_items(data.get("results", []), content_keys=("raw_content", "content")),
-            metadata={
-                "response_time": data.get("response_time"),
-                "failed_results": data.get("failed_results", []),
-            },
-        )
-
-    def _normalize_crawl(self, payload: Any) -> ToolResult:
-        data = self._as_dict(payload)
-        return ToolResult(
-            tool_name="crawl",
-            output=self._collect_items(data.get("results", []), content_keys=("raw_content", "content")),
-            metadata={
-                "base_url": data.get("base_url"),
-                "response_time": data.get("response_time"),
-            },
-        )
-
-    def _collect_items(
-        self,
-        results: Any,
         *,
-        content_keys: tuple[str, ...],
-    ) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
-        if not isinstance(results, list):
-            return output
-        for item in results:
+        name: str,
+        fn: Callable[..., Any],
+        fmt: Callable[[Any], ToolRes],
+        **kwargs: Any,
+    ) -> ToolRes:
+        try:
+            data = fn(**kwargs)
+        except Exception as err:
+            raise ToolError(f"tavily {name} failed: {err}") from err
+        return fmt(data)
+
+    def _search_res(self, data: Any) -> ToolRes:
+        body = self._dict(data)
+        return ToolRes(
+            name="search",
+            items=self._items(body.get("results", []), keys=("content", "raw_content")),
+            meta={
+                "query": body.get("query"),
+                "answer": body.get("answer"),
+                "response_time": body.get("response_time"),
+            },
+        )
+
+    def _extract_res(self, data: Any) -> ToolRes:
+        body = self._dict(data)
+        return ToolRes(
+            name="extract",
+            items=self._items(body.get("results", []), keys=("raw_content", "content")),
+            meta={
+                "response_time": body.get("response_time"),
+                "failed_results": body.get("failed_results", []),
+            },
+        )
+
+    def _items(self, data: Any, *, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if not isinstance(data, list):
+            return out
+        for item in data:
             if not isinstance(item, dict):
                 continue
-            content = ""
-            for key in content_keys:
+            text = ""
+            for key in keys:
                 value = str(item.get(key, "")).strip()
                 if value:
-                    content = self._trim_text(value)
+                    text = self._trim(value)
                     break
-            output.append(
+            out.append(
                 {
                     "title": item.get("title", item.get("url", "")),
                     "url": item.get("url", ""),
-                    "content": content,
+                    "content": text,
                 }
             )
-        return output
+        return out
 
-    def _as_dict(self, payload: Any) -> dict[str, Any]:
-        if isinstance(payload, dict):
-            return payload
-        raise ToolExecutionError("Tavily client returned an unexpected payload type")
+    def _dict(self, data: Any) -> dict[str, Any]:
+        if isinstance(data, dict):
+            return data
+        raise ToolError("Tavily client returned an unexpected payload type")
 
-    def _trim_text(self, value: Any, limit: int = 280) -> str:
+    def _trim(self, value: Any, limit: int = 280) -> str:
         text = str(value or "").strip()
         if len(text) <= limit:
             return text
         return f"{text[: limit - 3].rstrip()}..."
 
 
-class ToolRegistry:
+class ToolMap:
     def __init__(self) -> None:
-        self._tools: dict[str, BaseTool] = {}
+        self.items: dict[str, Tool] = {}
 
-    def register(self, tool: BaseTool) -> None:
+    def add(self, tool: Tool) -> None:
         if not getattr(tool, "name", "").strip():
-            raise ToolExecutionError("tools must define a non-empty name")
-        self._tools[tool.name] = tool
+            raise ToolError("tools must define a non-empty name")
+        self.items[tool.name] = tool
 
-    def get(self, name: str) -> BaseTool:
+    def get(self, name: str) -> Tool:
         try:
-            return self._tools[name]
-        except KeyError as exc:
-            raise ToolExecutionError(f"tool '{name}' is not registered") from exc
+            return self.items[name]
+        except KeyError as err:
+            raise ToolError(f"tool '{name}' is not registered") from err
 
     def names(self) -> tuple[str, ...]:
-        return tuple(sorted(self._tools))
+        return tuple(sorted(self.items))
 
-    def run(self, name: str, **kwargs: Any) -> ToolResult:
+    def run(self, name: str, **kwargs: Any) -> ToolRes:
         return self.get(name).run(**kwargs)
-
-
-Tool = BaseTool

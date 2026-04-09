@@ -6,36 +6,45 @@ from typing import Any
 from .schema import SchemaLike
 
 
+@dataclass(slots=True, frozen=True)
+class Caps:
+    system: bool = True
+    schema: bool = True
+    tools: bool = True
+    ctx: int | None = None
+    cost: str = "standard"
+
+
 @dataclass(slots=True)
-class FlashRequest:
+class Req:
     prompt: str
-    system_instruction: str | None = None
+    system: str | None = None
     model: str | None = None
-    include_raw: bool = False
+    raw: bool = False
     schema: SchemaLike | None = None
-    options: dict[str, Any] = field(default_factory=dict)
+    opts: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
-class FlashResponse:
+class Res:
     text: str
     provider: str
-    model_used: str
-    route_reason: str = ""
-    retry_count: int = 0
-    latency_ms: float | None = None
+    model: str
+    reason: str = ""
+    retries: int = 0
+    latency: float | None = None
     raw: Any = None
-    structured_output: Any = None
-    search_used: bool = False
+    think: str | None = None
+    data: Any = None
+    searched: bool = False
     search_query: str | None = None
-    search_summary: str | None = None
-    skills_used: tuple[str, ...] = ()
-    skills_summary: str | None = None
+    search_note: str | None = None
+    skills: tuple[str, ...] = ()
+    skill_note: str | None = None
+    tools: tuple[str, ...] = ()
+    caps: Caps | None = None
     error: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None
-
-
-AIResponse = FlashResponse

@@ -7,161 +7,132 @@ from typing import Any
 
 import requests
 
-from .config import FlashConfig
-from .errors import ProviderError, RetryExhaustedError, TimeoutError
+from .config import Config
+from .errors import ProviderError, RetryError, TimeoutError
 
 
 @dataclass(slots=True)
-class TransportResult:
-    payload: Any
-    status_code: int
-    retry_count: int
-    latency_ms: float
+class NetRes:
+    data: Any
+    status: int
+    retries: int
+    latency: float
 
 
-class HttpTransport:
+class Transport:
     def __init__(
         self,
-        config: FlashConfig,
+        cfg: Config,
         *,
         session: requests.Session | None = None,
-        sleeper=time.sleep,
-        random_fn=random.uniform,
-    ):
-        self.config = config
+        sleep=time.sleep,
+        rand=random.uniform,
+    ) -> None:
+        self.cfg = cfg
         self.session = session or requests.Session()
-        self.sleeper = sleeper
-        self.random_fn = random_fn
+        self.sleep = sleep
+        self.rand = rand
 
-    def post_json(
+    def emit(self, event: str, **data: Any) -> None:
+        for hook in self.cfg.hooks:
+            hook(event, data)
+
+    def post(
         self,
         *,
         url: str,
-        payload: dict[str, Any],
-        provider_name: str,
-    ) -> TransportResult:
-        attempts = 0
-        last_error: ProviderError | None = None
+        data: dict[str, Any],
+        provider: str,
+    ) -> NetRes:
+        tries = 0
+        last: ProviderError | None = None
 
         while True:
-            started_at = time.perf_counter()
+            started = time.perf_counter()
+            self.emit("request_started", provider=provider, url=url, payload=data, attempt=tries + 1)
             try:
-                self._log(f"[{provider_name}] POST {url} json={payload}")
-                response = self.session.post(
-                    url,
-                    json=payload,
-                    timeout=self.config.timeout,
-                )
-                latency_ms = (time.perf_counter() - started_at) * 1000
+                self._log(f"[{provider}] POST {url} json={data}")
+                res = self.session.post(url, json=data, timeout=self.cfg.timeout)
+                latency = (time.perf_counter() - started) * 1000
 
-                if response.status_code in self.config.retry_status_codes:
-                    error = self._http_error(
-                        provider_name=provider_name,
-                        response=response,
-                        retryable=True,
-                    )
-                    raise error
+                if res.status_code in self.cfg.retry_codes:
+                    raise self._http_err(provider=provider, res=res, retry=True)
 
                 try:
-                    response.raise_for_status()
-                except requests.HTTPError as exc:
-                    raise self._http_error(
-                        provider_name=provider_name,
-                        response=response,
-                        retryable=False,
-                    ) from exc
+                    res.raise_for_status()
+                except requests.HTTPError as err:
+                    raise self._http_err(provider=provider, res=res, retry=False) from err
 
                 try:
-                    data = response.json()
-                except ValueError as exc:
+                    body = res.json()
+                except ValueError as err:
                     raise ProviderError(
-                        f"{provider_name} returned invalid JSON",
-                        provider=provider_name,
-                        status_code=response.status_code,
-                    ) from exc
+                        f"{provider} returned invalid JSON",
+                        provider=provider,
+                        status=res.status_code,
+                    ) from err
 
-                return TransportResult(
-                    payload=data,
-                    status_code=response.status_code,
-                    retry_count=attempts,
-                    latency_ms=latency_ms,
-                )
+                return NetRes(data=body, status=res.status_code, retries=tries, latency=latency)
 
-            except requests.Timeout as exc:
-                last_error = TimeoutError(
-                    f"{provider_name} request timed out after {self.config.timeout}s",
-                    provider=provider_name,
+            except requests.Timeout:
+                last = TimeoutError(
+                    f"{provider} request timed out after {self.cfg.timeout}s",
+                    provider=provider,
                 )
-            except requests.ConnectionError as exc:
-                last_error = ProviderError(
-                    f"{provider_name} temporary network failure: {exc}",
-                    provider=provider_name,
-                )
-            except ProviderError as exc:
-                last_error = exc
-            except requests.RequestException as exc:
-                last_error = ProviderError(
-                    f"{provider_name} request failed: {exc}",
-                    provider=provider_name,
-                )
+            except requests.ConnectionError as err:
+                last = ProviderError(f"{provider} temporary network failure: {err}", provider=provider)
+            except ProviderError as err:
+                last = err
+            except requests.RequestException as err:
+                last = ProviderError(f"{provider} request failed: {err}", provider=provider)
 
-            if last_error is None:
+            if last is None:
                 raise RuntimeError("transport reached an impossible error state")
 
-            if attempts >= self.config.max_retries or not self._is_retryable(last_error):
-                if attempts == 0:
-                    raise last_error
-                raise RetryExhaustedError(
-                    f"{provider_name} failed after {attempts + 1} attempts: {last_error}",
-                    provider=provider_name,
-                    status_code=last_error.status_code,
-                    attempts=attempts + 1,
-                ) from last_error
+            if tries >= self.cfg.retries or not self._can_retry(last):
+                if tries == 0:
+                    raise last
+                raise RetryError(
+                    f"{provider} failed after {tries + 1} attempts: {last}",
+                    provider=provider,
+                    status=last.status,
+                    tries=tries + 1,
+                ) from last
 
-            delay = self._compute_backoff(attempts)
-            self._log(
-                (
-                    f"[{provider_name}] retry {attempts + 1}/{self.config.max_retries} "
-                    f"in {delay:.2f}s after: {last_error}"
-                )
-            )
-            self.sleeper(delay)
-            attempts += 1
+            delay = self._backoff(tries)
+            self.emit("retry_scheduled", provider=provider, attempt=tries + 1, delay=delay, error=str(last))
+            self._log(f"[{provider}] retry {tries + 1}/{self.cfg.retries} in {delay:.2f}s after: {last}")
+            self.sleep(delay)
+            tries += 1
 
-    def _is_retryable(self, error: ProviderError) -> bool:
-        if isinstance(error, TimeoutError):
+    def _can_retry(self, err: ProviderError) -> bool:
+        if isinstance(err, TimeoutError):
             return True
-        if error.status_code is not None:
-            return error.status_code in self.config.retry_status_codes
-        return "temporary network failure" in str(error).lower()
+        if err.status is not None:
+            return err.status in self.cfg.retry_codes
+        return "temporary network failure" in str(err).lower()
 
-    def _compute_backoff(self, attempt: int) -> float:
-        base_delay = self.config.backoff_base * (
-            self.config.backoff_multiplier ** attempt
-        )
-        jitter = self.random_fn(0.0, self.config.jitter) if self.config.jitter else 0.0
-        return min(self.config.backoff_max, base_delay + jitter)
+    def _backoff(self, step: int) -> float:
+        delay = self.cfg.backoff * (self.cfg.backoff_rate ** step)
+        jitter = self.rand(0.0, self.cfg.jitter) if self.cfg.jitter else 0.0
+        return min(self.cfg.backoff_max, delay + jitter)
 
-    def _http_error(
+    def _http_err(
         self,
         *,
-        provider_name: str,
-        response: requests.Response,
-        retryable: bool,
+        provider: str,
+        res: requests.Response,
+        retry: bool,
     ) -> ProviderError:
-        response_text = response.text.strip().replace("\n", " ")
-        if len(response_text) > 200:
-            response_text = f"{response_text[:197]}..."
-        prefix = "temporary upstream failure" if retryable else "request failed"
-        message = f"{provider_name} {prefix} with HTTP {response.status_code}"
-        if response_text:
-            message = f"{message}: {response_text}"
-        return ProviderError(
-            message,
-            provider=provider_name,
-            status_code=response.status_code,
-        )
+        text = res.text.strip().replace("\n", " ")
+        if len(text) > 200:
+            text = f"{text[:197]}..."
+        prefix = "temporary upstream failure" if retry else "request failed"
+        msg = f"{provider} {prefix} with HTTP {res.status_code}"
+        if text:
+            msg = f"{msg}: {text}"
+        return ProviderError(msg, provider=provider, status=res.status_code)
 
-    def _log(self, message: str) -> None:
-        if self.config.debug or self.config.request_logging:
-            print(message)
+    def _log(self, msg: str) -> None:
+        if self.cfg.debug or self.cfg.log_req:
+            print(msg)

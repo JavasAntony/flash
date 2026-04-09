@@ -1,276 +1,252 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from javaxFlash import (
-    Client,
-    Config,
-    FlashClient,
-    FlashConfig,
-    JsonSchema,
-    ProviderError,
-    Schema,
-    SchemaValidationError,
-    ToolExecutionError,
-)
-from javaxFlash.tools import ToolResult
-from javaxFlash.transport import TransportResult
+from javaxFlash import AsyncClient, Client, Config, ProviderError, Schema, SchemaError, ToolError
+from javaxFlash.tools import ToolRes
+from javaxFlash.transport import NetRes
 
 
-class FakeTransport:
-    def __init__(self, responses: dict[str, list[object]]):
-        self.responses = {name: list(items) for name, items in responses.items()}
+class FakeNet:
+    def __init__(self, data: dict[str, list[object]]):
+        self.data = {name: list(items) for name, items in data.items()}
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def post_json(self, *, url: str, payload: dict[str, object], provider_name: str) -> TransportResult:
-        self.calls.append((provider_name, payload))
-        item = self.responses[provider_name].pop(0)
+    def post(self, *, url: str, data: dict[str, object], provider: str) -> NetRes:
+        self.calls.append((provider, data))
+        item = self.data[provider].pop(0)
         if isinstance(item, Exception):
             raise item
         return item
 
 
-def make_result(
+def net_res(
     text: str,
     *,
     model: str = "test-model",
-    retry_count: int = 0,
-    latency_ms: float = 12.5,
-) -> TransportResult:
-    return TransportResult(
-        payload={"text": text, "model": model},
-        status_code=200,
-        retry_count=retry_count,
-        latency_ms=latency_ms,
-    )
+    retries: int = 0,
+    latency: float = 12.5,
+) -> NetRes:
+    return NetRes(data={"text": text, "model": model}, status=200, retries=retries, latency=latency)
 
 
 def test_forced_provider_alias_resolves_to_flash() -> None:
-    transport = FakeTransport({"flash": [make_result("hello from flash")], "deepseek": []})
-    client = FlashClient(transport=transport)
+    net = FakeNet({"flash": [net_res("hello from flash")], "deepseek": []})
+    client = Client(net=net)
 
-    response = client.flash("Say hello.", provider="gemini")
+    res = client.flash("Say hello.", provider="gemini")
 
-    assert response.provider == "flash"
-    assert response.text == "hello from flash"
-    assert response.route_reason == "provider forced explicitly: flash"
-
-
-def test_simple_public_aliases_point_to_main_types() -> None:
-    assert Client is FlashClient
-    assert Config is FlashConfig
-    assert JsonSchema is Schema
+    assert res.provider == "flash"
+    assert res.text == "hello from flash"
+    assert res.reason == "provider forced explicitly: flash"
 
 
 def test_fallback_uses_secondary_provider_when_primary_fails() -> None:
-    transport = FakeTransport(
+    net = FakeNet(
         {
             "flash": [ProviderError("flash unavailable", provider="flash")],
-            "deepseek": [make_result("fallback response", model="deepseek-r1")],
+            "deepseek": [net_res("fallback response", model="deepseek-r1")],
         }
     )
-    client = FlashClient(
-        config=FlashConfig(fallback_enabled=True),
-        transport=transport,
-    )
+    client = Client(cfg=Config(fallback=True), net=net)
 
-    response = client.flash("What is Python?")
+    res = client.flash("What is Python?")
 
-    assert response.provider == "deepseek"
-    assert response.text == "fallback response"
-    assert "fallback to deepseek" in response.route_reason
+    assert res.provider == "deepseek"
+    assert res.text == "fallback response"
+    assert "fallback to deepseek" in res.reason
 
 
 def test_structured_output_is_parsed_when_schema_is_provided() -> None:
-    transport = FakeTransport(
-        {
-            "flash": [
-                make_result('{"title":"Cleanup auth","priority":"high","action_items":["refactor","test"]}')
-            ],
-            "deepseek": [],
-        }
-    )
-    client = FlashClient(transport=transport)
-    schema = Schema(
-        name="task",
-        fields={
-            "title": str,
-            "priority": str,
-            "action_items": [str],
-        },
-    )
+    net = FakeNet({"flash": [net_res('{"title":"Cleanup auth","priority":"high","items":["refactor","test"]}')], "deepseek": []})
+    client = Client(net=net)
+    schema = Schema(name="task", fields={"title": str, "priority": str, "items": [str]})
 
-    response = client.flash("Plan the work.", provider="flash", schema=schema)
+    res = client.flash("Plan the work.", provider="flash", schema=schema)
 
-    assert response.structured_output == {
-        "title": "Cleanup auth",
-        "priority": "high",
-        "action_items": ["refactor", "test"],
-    }
-    provider_name, payload = transport.calls[0]
-    assert provider_name == "flash"
+    assert res.data == {"title": "Cleanup auth", "priority": "high", "items": ["refactor", "test"]}
+    provider, payload = net.calls[0]
+    assert provider == "flash"
     assert "Return the answer as valid JSON matching this schema." in payload["prompt"]
 
 
-def test_schema_validation_error_is_raised_for_invalid_json_shape() -> None:
-    transport = FakeTransport(
-        {
-            "flash": [make_result('{"title":"Cleanup auth"}')],
-            "deepseek": [],
-        }
-    )
-    client = FlashClient(transport=transport)
-    schema = Schema(
-        name="task",
-        fields={
-            "title": str,
-            "priority": str,
-        },
-    )
+def test_schema_error_is_raised_for_invalid_json_shape() -> None:
+    net = FakeNet({"flash": [net_res('{"title":"Cleanup auth"}')], "deepseek": []})
+    client = Client(net=net)
+    schema = Schema(name="task", fields={"title": str, "priority": str})
 
-    with pytest.raises(SchemaValidationError):
+    with pytest.raises(SchemaError):
         client.flash("Plan the work.", provider="flash", schema=schema)
 
 
-class FakeSearchTool:
+class FakeSearch:
     name = "tavily"
-    description = "fake search"
+    desc = "fake search"
 
     def search(self, query: str, limit: int = 5):
-        return ToolResult(
-            tool_name=self.name,
-            output=[
-                {
-                    "title": "Python 3.13 Release Notes",
-                    "url": "https://example.com/python-313",
-                    "content": "Python 3.13 improves startup performance and error messages.",
-                    "published_date": "2024-10-07",
-                    "score": 0.98,
-                }
-            ],
-            metadata={
-                "answer": "Python 3.13 includes interpreter and error-message improvements.",
-                "query": query,
-            },
+        return ToolRes(
+            name=self.name,
+            items=[{"title": "Python 3.13 Release Notes", "url": "https://example.com/python-313", "content": "Python 3.13 improves startup performance and error messages."}],
+            meta={"answer": "Python 3.13 includes interpreter and error-message improvements.", "query": query},
         )
 
     def extract(self, url: str):
-        return ToolResult(
-            tool_name=self.name,
-            output=[
-                {
-                    "title": "Python docs",
-                    "url": url,
-                    "content": "The docs explain retries and recommended patterns.",
-                }
-            ],
-        )
-
-    def crawl(self, url: str, instructions: str | None = None):
-        return ToolResult(
-            tool_name=self.name,
-            output=[
-                {
-                    "title": "Docs page",
-                    "url": url,
-                    "content": f"Crawled content with instructions: {instructions or 'none'}",
-                }
-            ],
-        )
+        return ToolRes(name=self.name, items=[{"title": "Python docs", "url": url, "content": "The docs explain retries and recommended patterns."}])
 
 
-def test_auto_search_adds_curated_search_context_to_prompt() -> None:
-    transport = FakeTransport({"flash": [make_result("fresh answer")], "deepseek": []})
-    client = FlashClient(
-        config=FlashConfig(auto_search=True, tavily_api_key="test-key"),
-        transport=transport,
-    )
-    client.register_tool(FakeSearchTool())
+def test_search_is_not_auto_injected_by_default_even_when_auto_search_is_enabled() -> None:
+    net = FakeNet({"flash": [net_res("fresh answer")], "deepseek": []})
+    client = Client(cfg=Config(auto_search=True, tavily_key="test-key"), net=net)
+    client.register_tool(FakeSearch())
 
-    response = client.flash("What is the latest Python release?")
+    res = client.flash("What is the latest Python release?")
 
-    assert response.search_used is True
-    assert response.search_query == "What is the latest Python release?"
-    _, payload = transport.calls[0]
+    assert res.searched is False
+    assert res.search_query is None
+    _, payload = net.calls[0]
+    assert "Skill grounding data:" not in payload["prompt"]
+
+
+def test_auto_tools_can_be_enabled_explicitly_for_legacy_behavior() -> None:
+    net = FakeNet({"flash": [net_res("fresh answer")], "deepseek": []})
+    client = Client(cfg=Config(auto_search=True, auto_tools=True, tavily_key="test-key"), net=net)
+    client.register_tool(FakeSearch())
+
+    res = client.flash("What is the latest Python release?")
+
+    assert res.searched is True
+    assert res.search_query == "What is the latest Python release?"
+    _, payload = net.calls[0]
     assert "Skill grounding data:" in payload["prompt"]
-    assert "Python 3.13 Release Notes" in payload["prompt"]
-    assert "https://example.com/python-313" in payload["prompt"]
 
 
 def test_explicit_search_can_be_enabled_per_request() -> None:
-    transport = FakeTransport({"flash": [make_result("answer")], "deepseek": []})
-    client = FlashClient(
-        config=FlashConfig(auto_search=False, tavily_api_key="test-key"),
-        transport=transport,
-    )
-    client.register_tool(FakeSearchTool())
+    net = FakeNet({"flash": [net_res("answer")], "deepseek": []})
+    client = Client(cfg=Config(auto_search=False, tavily_key="test-key"), net=net)
+    client.register_tool(FakeSearch())
 
-    response = client.flash("Explain retries", use_search=True, search_query="retry best practices")
+    res = client.flash("Explain retries", use_search=True, search_query="retry best practices")
 
-    assert response.search_used is True
-    assert response.search_query == "retry best practices"
+    assert res.searched is True
+    assert res.search_query == "retry best practices"
 
 
 def test_manual_skills_are_injected_into_prompt_without_returning_tool_result() -> None:
-    transport = FakeTransport({"flash": [make_result("final ai answer")], "deepseek": []})
-    client = FlashClient(
-        config=FlashConfig(search_tool_name="tavily", tavily_api_key="test-key"),
-        transport=transport,
-    )
-    client.register_tool(FakeSearchTool())
+    net = FakeNet({"flash": [net_res("final ai answer")], "deepseek": []})
+    client = Client(cfg=Config(search_tool="tavily", tavily_key="test-key"), net=net)
+    client.register_tool(FakeSearch())
 
-    response = client.flash(
-        "Use docs https://docs.example.com/retries",
-        skills=["search", "extract"],
-        search_query="retry best practices",
-    )
+    res = client.flash("Use docs https://docs.example.com/retries", skills=["search", "extract"], search_query="retry best practices")
 
-    assert response.text == "final ai answer"
-    assert response.skills_used == ("search", "extract")
-    _, payload = transport.calls[0]
+    assert res.text == "final ai answer"
+    assert res.skills == ("search", "extract")
+    _, payload = net.calls[0]
     assert "Web search findings:" in payload["prompt"]
     assert "Extracted page content:" in payload["prompt"]
-    assert "ToolResult(" not in payload["prompt"]
-
-
-def test_manual_crawl_skill_is_injected_into_prompt() -> None:
-    transport = FakeTransport({"flash": [make_result("final ai answer")], "deepseek": []})
-    client = FlashClient(
-        config=FlashConfig(search_tool_name="tavily", tavily_api_key="test-key"),
-        transport=transport,
-    )
-    client.register_tool(FakeSearchTool())
-
-    response = client.flash(
-        "Crawl docs from https://docs.example.com/retries",
-        skills=["crawl"],
-        crawl_instructions="Focus on retry recommendations",
-    )
-
-    assert response.skills_used == ("crawl",)
-    _, payload = transport.calls[0]
-    assert "Crawled site content:" in payload["prompt"]
-    assert "Focus on retry recommendations" in payload["prompt"]
 
 
 def test_manual_extract_without_url_raises_clear_error() -> None:
-    client = FlashClient(config=FlashConfig(search_tool_name="tavily", tavily_api_key="test-key"))
-    client.register_tool(FakeSearchTool())
+    client = Client(cfg=Config(search_tool="tavily", tavily_key="test-key"))
+    client.register_tool(FakeSearch())
 
     with pytest.raises(ValueError):
         client.flash("Summarize this page", skills=["extract"])
 
 
 def test_manual_search_surfaces_tool_errors_cleanly() -> None:
-    class BrokenSearchTool:
+    class BrokenSearch:
         name = "tavily"
-        description = "broken search"
+        desc = "broken search"
 
         def search(self, query: str, limit: int = 5):
-            raise ToolExecutionError("search backend unavailable")
+            raise ToolError("search backend unavailable")
 
-    client = FlashClient(config=FlashConfig(search_tool_name="tavily", tavily_api_key="test-key"))
-    client.register_tool(BrokenSearchTool())
+    client = Client(cfg=Config(search_tool="tavily", tavily_key="test-key"))
+    client.register_tool(BrokenSearch())
 
-    with pytest.raises(ToolExecutionError):
+    with pytest.raises(ToolError):
         client.flash("What is the latest Python release?", skills="search")
+
+
+def test_local_function_tool_results_are_injected_into_prompt() -> None:
+    net = FakeNet({"flash": [net_res("answer with local tool")], "deepseek": []})
+    client = Client(net=net)
+    client.add_fn("project_info", lambda: {"title": "Project", "content": "The library focuses on multi-provider routing."})
+
+    res = client.flash("Summarize the current project focus.", tool_calls={"project_info": {}})
+
+    assert res.tools == ("project_info",)
+    _, payload = net.calls[0]
+    assert "Local tool results:" in payload["prompt"]
+
+
+def test_session_keeps_conversation_history_between_calls() -> None:
+    net = FakeNet({"flash": [net_res("First answer"), net_res("Second answer")], "deepseek": []})
+    client = Client(net=net)
+    session = client.session()
+
+    session.ask("My name is Javas.")
+    session.ask("What is my name?")
+
+    _, payload = net.calls[1]
+    assert "Conversation so far:" in payload["prompt"]
+    assert "User: My name is Javas." in payload["prompt"]
+
+
+def test_hooks_receive_request_response_and_tool_events() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    net = FakeNet({"flash": [net_res("hooked")], "deepseek": []})
+    client = Client(cfg=Config(hooks=(lambda event, data: events.append((event, data)),)), net=net)
+    client.add_fn("echo_tool", lambda text: {"content": text})
+
+    client.flash("Echo this tool output.", tool_calls={"echo_tool": {"text": "hi"}})
+
+    names = [event for event, _ in events]
+    assert "flash_requested" in names
+    assert "tool_called" in names
+    assert "response_received" in names
+
+
+def test_async_client_wraps_sync_flash_client() -> None:
+    net = FakeNet({"flash": [net_res("async hello")], "deepseek": []})
+    client = AsyncClient(net=net)
+
+    res = asyncio.run(client.flash("Say hello."))
+
+    assert res.text == "async hello"
+    assert res.provider == "flash"
+
+
+def test_caps_are_exposed_on_client_and_response() -> None:
+    net = FakeNet({"flash": [net_res("hello")], "deepseek": []})
+    client = Client(net=net)
+
+    res = client.flash("Say hello.")
+    caps = client.get_caps("flash")
+
+    assert res.caps == caps
+    assert caps.schema is True
+
+
+def test_deepseek_thinking_tags_are_parsed_cleanly() -> None:
+    net = FakeNet(
+        {
+            "flash": [],
+            "deepseek": [
+                NetRes(
+                    data={"text": "<thinking>internal chain of thought</thinking>Clean final answer."},
+                    status=200,
+                    retries=0,
+                    latency=5.0,
+                )
+            ],
+        }
+    )
+    client = Client(net=net)
+
+    res = client.flash("Analyze this deeply.", provider="deepseek")
+
+    assert res.text == "Clean final answer."
+    assert res.think == "internal chain of thought"

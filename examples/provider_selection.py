@@ -1,19 +1,28 @@
-from javaxFlash import Client
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from javaxFlash import Client, ProviderError
 
 
-client = Client()
+def main() -> None:
+    client = Client()
+    try:
+        auto = client.flash("What is Python used for?")
+        print("Auto:", auto.provider)
 
-auto_response = client.flash("What is Python used for?")
-print("Auto routed to:", auto_response.provider)
+        deep = client.flash(
+            "Compare a monolith and microservices for a growing SaaS product.",
+            mode="reasoning",
+        )
+        print("Reasoning:", deep.provider)
 
-reasoning_response = client.flash(
-    "Compare a monolith and microservices for a growing SaaS product.",
-    mode="reasoning",
-)
-print("Reasoning mode provider:", reasoning_response.provider)
+        forced = client.flash("Use the flash provider directly.", provider="flash")
+        print("Forced:", forced.provider)
+    except ProviderError as err:
+        print(f"Example could not reach provider: {err}")
 
-forced_response = client.flash(
-    "Use the flash provider directly.",
-    provider="flash",
-)
-print("Forced provider:", forced_response.provider)
+
+if __name__ == "__main__":
+    main()

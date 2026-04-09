@@ -1,158 +1,170 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import re
 from typing import Any
 
-from .config import FlashConfig, normalize_provider_name
-from .errors import ProviderError, ProviderNotFoundError
-from .models import FlashRequest, FlashResponse
-from .transport import HttpTransport
+from .config import Config, norm_provider
+from .errors import MissingProviderError, ProviderError
+from .models import Caps, Req, Res
+from .transport import Transport
 
 
-class BaseProvider(ABC):
+class Provider(ABC):
     name: str
-    endpoint: str
+    url: str
+    caps = Caps()
 
-    def __init__(self, config: FlashConfig, transport: HttpTransport):
-        self.config = config
-        self.transport = transport
+    def __init__(self, cfg: Config, net: Transport) -> None:
+        self.cfg = cfg
+        self.net = net
 
-    def generate(self, request: FlashRequest) -> FlashResponse:
-        payload = self.build_payload(request)
-        result = self.transport.post_json(
-            url=self.endpoint,
-            payload=payload,
-            provider_name=self.name,
-        )
-        raw = result.payload
-        text = self.extract_text(raw)
+    def run(self, req: Req) -> Res:
+        payload = self.build(req)
+        net_res = self.net.post(url=self.url, data=payload, provider=self.name)
+        raw = net_res.data
+        think, text = self.read_text(raw)
         if not text:
-            raise ProviderError(
-                f"{self.name} response did not contain usable text",
-                provider=self.name,
-            )
-
-        return FlashResponse(
+            raise ProviderError(f"{self.name} response did not contain usable text", provider=self.name)
+        return Res(
             text=text.strip(),
             provider=self.name,
-            model_used=self.extract_model(raw, request),
-            retry_count=result.retry_count,
-            latency_ms=result.latency_ms,
-            raw=raw if request.include_raw else None,
+            model=self.read_model(raw, req),
+            retries=net_res.retries,
+            latency=net_res.latency,
+            raw=raw if req.raw else None,
+            think=think,
+            caps=self.caps,
         )
 
     @abstractmethod
-    def build_payload(self, request: FlashRequest) -> dict[str, Any]:
+    def build(self, req: Req) -> dict[str, Any]:
         raise NotImplementedError
 
-    def extract_text(self, raw: Any) -> str:
+    def read_text(self, raw: Any) -> tuple[str | None, str]:
         if isinstance(raw, str):
-            return raw
-
+            return self._split_text(raw)
         if isinstance(raw, dict):
             for key in ("text", "response", "answer", "result", "message", "content"):
-                value = raw.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value
-
+                val = raw.get(key)
+                if isinstance(val, str) and val.strip():
+                    return self._split_text(val)
             data = raw.get("data")
             if isinstance(data, dict):
-                return self.extract_text(data)
-
-            candidates = raw.get("candidates")
-            if isinstance(candidates, list):
-                collected: list[str] = []
-                for candidate in candidates:
-                    if isinstance(candidate, dict):
-                        text = self.extract_text(candidate)
+                return self.read_text(data)
+            items = raw.get("candidates")
+            if isinstance(items, list):
+                thinks: list[str] = []
+                texts: list[str] = []
+                for item in items:
+                    if isinstance(item, dict):
+                        think, text = self.read_text(item)
+                        if think:
+                            thinks.append(think)
                         if text:
-                            collected.append(text)
-                if collected:
-                    return "\n".join(collected)
-
-            parts = raw.get("parts")
-            if isinstance(parts, list):
-                collected = []
-                for part in parts:
-                    if isinstance(part, dict):
-                        text = part.get("text")
+                            texts.append(text)
+                if texts:
+                    return ("\n".join(thinks) if thinks else None, "\n".join(texts))
+            items = raw.get("parts")
+            if isinstance(items, list):
+                thinks: list[str] = []
+                parts = []
+                for item in items:
+                    if isinstance(item, dict):
+                        text = item.get("text")
                         if isinstance(text, str) and text.strip():
-                            collected.append(text.strip())
-                if collected:
-                    return "\n".join(collected)
-
+                            think, final = self._split_text(text.strip())
+                            if think:
+                                thinks.append(think)
+                            if final:
+                                parts.append(final)
+                if parts:
+                    return ("\n".join(thinks) if thinks else None, "\n".join(parts))
         if isinstance(raw, list):
-            collected = [self.extract_text(item) for item in raw]
-            collected = [item for item in collected if item]
-            if collected:
-                return "\n".join(collected)
+            thinks: list[str] = []
+            texts: list[str] = []
+            for item in raw:
+                think, text = self.read_text(item)
+                if think:
+                    thinks.append(think)
+                if text:
+                    texts.append(text)
+            if texts:
+                return ("\n".join(thinks) if thinks else None, "\n".join(texts))
+        return (None, "")
 
-        return ""
-
-    def extract_model(self, raw: Any, request: FlashRequest) -> str:
+    def read_model(self, raw: Any, req: Req) -> str:
         if isinstance(raw, dict):
             for key in ("model", "model_used"):
-                value = raw.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value
-        return self.config.resolve_model(self.name, request.model)
+                val = raw.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+        return self.cfg.pick_model(self.name, req.model)
+
+    def _split_text(self, text: str) -> tuple[str | None, str]:
+        raw = text.strip()
+        if not raw:
+            return (None, "")
+        match = re.search(r"<thinking>(.*?)</thinking>", raw, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            return (None, raw)
+        think = match.group(1).strip() or None
+        final = re.sub(r"<thinking>.*?</thinking>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+        return (think, final)
 
 
-class FlashProvider(BaseProvider):
+class Flash(Provider):
     name = "flash"
-    endpoint = "https://api.siputzx.my.id/api/ai/gemini-lite"
+    url = "https://api.siputzx.my.id/api/ai/gemini-lite"
+    caps = Caps(cost="low")
 
-    def build_payload(self, request: FlashRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "prompt": request.prompt,
-            "model": self.config.resolve_model(self.name, request.model),
+    def build(self, req: Req) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "prompt": req.prompt,
+            "model": self.cfg.pick_model(self.name, req.model),
         }
-        if request.system_instruction:
-            payload["system"] = request.system_instruction
-        temperature = request.options.get("temperature")
-        if temperature is not None:
-            payload["temperature"] = temperature
-        return payload
+        if req.system:
+            data["system"] = req.system
+        temp = req.opts.get("temperature")
+        if temp is not None:
+            data["temperature"] = temp
+        return data
 
 
-class DeepSeekProvider(BaseProvider):
+class DeepSeek(Provider):
     name = "deepseek"
-    endpoint = "https://api.siputzx.my.id/api/ai/deepseekr1"
+    url = "https://api.siputzx.my.id/api/ai/deepseekr1"
 
-    def build_payload(self, request: FlashRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "prompt": request.prompt,
-            "model": self.config.resolve_model(self.name, request.model),
-            "system": request.system_instruction or self.config.default_system_instruction,
-            "temperature": request.options.get(
-                "temperature",
-                self.config.deepseek_temperature,
-            ),
+    def build(self, req: Req) -> dict[str, Any]:
+        return {
+            "prompt": req.prompt,
+            "model": self.cfg.pick_model(self.name, req.model),
+            "system": req.system or self.cfg.system,
+            "temperature": req.opts.get("temperature", self.cfg.deepseek_temp),
         }
-        return payload
 
 
-class ProviderRegistry:
-    def __init__(self, providers: list[BaseProvider] | tuple[BaseProvider, ...]):
-        self.providers: dict[str, BaseProvider] = {}
-        for provider in providers:
-            self.register(provider)
+class ProviderMap:
+    def __init__(self, items: list[Provider] | tuple[Provider, ...]) -> None:
+        self.items: dict[str, Provider] = {}
+        for item in items:
+            self.add(item)
 
-    def register(self, provider: BaseProvider) -> None:
-        self.providers[provider.name] = provider
+    def add(self, item: Provider) -> None:
+        self.items[item.name] = item
 
-    def get(self, name: str) -> BaseProvider:
-        canonical_name = normalize_provider_name(name)
+    def get(self, name: str) -> Provider:
+        key = norm_provider(name)
         try:
-            return self.providers[canonical_name]
-        except KeyError as exc:
-            raise ProviderNotFoundError(
-                f"Unknown provider '{name}'. Available providers: {', '.join(sorted(self.providers))}",
-                provider=canonical_name,
-            ) from exc
+            return self.items[key]
+        except KeyError as err:
+            raise MissingProviderError(
+                f"Unknown provider '{name}'. Available providers: {', '.join(sorted(self.items))}",
+                provider=key,
+            ) from err
 
     def names(self) -> tuple[str, ...]:
-        return tuple(sorted(self.providers))
+        return tuple(sorted(self.items))
 
-
-GeminiLiteProvider = FlashProvider
+    def caps_for(self, name: str) -> Caps:
+        return self.get(name).caps

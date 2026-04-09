@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 
-class FlashError(Exception):
-    """Base exception for javaxFlash."""
+class AppError(Exception):
+    """Base error for javaxFlash."""
 
 
-class ProviderError(FlashError):
+class ProviderError(AppError):
     def __init__(
         self,
         message: str,
         *,
         provider: str | None = None,
-        status_code: int | None = None,
-    ):
+        status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.provider = provider
-        self.status_code = status_code
+        self.status = status
 
 
-class ProviderNotFoundError(ProviderError):
+class MissingProviderError(ProviderError):
     pass
 
 
@@ -26,22 +26,22 @@ class TimeoutError(ProviderError):
     pass
 
 
-class RetryExhaustedError(ProviderError):
+class RetryError(ProviderError):
     def __init__(
         self,
         message: str,
         *,
         provider: str | None = None,
-        status_code: int | None = None,
-        attempts: int = 0,
-    ):
-        super().__init__(message, provider=provider, status_code=status_code)
-        self.attempts = attempts
+        status: int | None = None,
+        tries: int = 0,
+    ) -> None:
+        super().__init__(message, provider=provider, status=status)
+        self.tries = tries
 
 
-class SchemaValidationError(FlashError):
+class SchemaError(AppError):
     pass
 
 
-class ToolExecutionError(FlashError):
+class ToolError(AppError):
     pass

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from unittest.mock import Mock
 
 import pytest
 import requests
 
-from javaxFlash import FlashConfig, RetryExhaustedError, TavilyTool, ToolExecutionError
-from javaxFlash.schema import parse_structured_output
-from javaxFlash.transport import HttpTransport
+from javaxFlash import Config, RetryError, Tavily, ToolError
+from javaxFlash.schema import parse_json
+from javaxFlash.transport import Transport
 
 
-class DummyResponse:
+class DummyRes:
     def __init__(self, status_code: int, payload: dict[str, object], text: str = ""):
         self.status_code = status_code
         self._payload = payload
@@ -28,137 +29,95 @@ class DummyResponse:
 def test_transport_retries_once_on_rate_limit_then_succeeds() -> None:
     session = Mock()
     session.post.side_effect = [
-        DummyResponse(429, {"error": "slow down"}, text="slow down"),
-        DummyResponse(200, {"text": "ok", "model": "flash"}),
+        DummyRes(429, {"error": "slow down"}, text="slow down"),
+        DummyRes(200, {"text": "ok", "model": "flash"}),
     ]
     delays: list[float] = []
-    transport = HttpTransport(
-        FlashConfig(max_retries=2, backoff_base=0.5, jitter=0.0),
+    net = Transport(
+        Config(retries=2, backoff=0.5, jitter=0.0),
         session=session,
-        sleeper=delays.append,
-        random_fn=lambda start, end: 0.0,
+        sleep=delays.append,
+        rand=lambda start, end: 0.0,
     )
 
-    result = transport.post_json(
-        url="https://example.com",
-        payload={"prompt": "hello"},
-        provider_name="flash",
-    )
+    res = net.post(url="https://example.com", data={"prompt": "hello"}, provider="flash")
 
-    assert result.retry_count == 1
+    assert res.retries == 1
     assert delays == [0.5]
 
 
-def test_transport_raises_retry_exhausted_after_repeated_timeouts() -> None:
+def test_transport_raises_retry_error_after_repeated_timeouts() -> None:
     session = Mock()
     session.post.side_effect = requests.Timeout("network timeout")
-    transport = HttpTransport(
-        FlashConfig(max_retries=2, jitter=0.0),
+    net = Transport(
+        Config(retries=2, jitter=0.0),
         session=session,
-        sleeper=lambda _: None,
-        random_fn=lambda start, end: 0.0,
+        sleep=lambda _: None,
+        rand=lambda start, end: 0.0,
     )
 
-    with pytest.raises(RetryExhaustedError) as exc:
-        transport.post_json(
-            url="https://example.com",
-            payload={"prompt": "hello"},
-            provider_name="flash",
-        )
+    with pytest.raises(RetryError) as err:
+        net.post(url="https://example.com", data={"prompt": "hello"}, provider="flash")
 
-    assert exc.value.attempts == 3
+    assert err.value.tries == 3
 
 
 @dataclass
-class TicketSummary:
+class Ticket:
     title: str
     priority: str
 
 
-def test_parse_structured_output_supports_dataclass_schemas() -> None:
-    result = parse_structured_output(
-        '{"title":"Refactor router","priority":"medium"}',
-        TicketSummary,
-    )
-
-    assert result == TicketSummary(title="Refactor router", priority="medium")
+def test_parse_json_supports_dataclass_schemas() -> None:
+    res = parse_json('{"title":"Refactor router","priority":"medium"}', Ticket)
+    assert res == Ticket(title="Refactor router", priority="medium")
 
 
-def test_tavily_tool_search_returns_simplified_results() -> None:
-    class FakeTavilyClient:
+class Priority(Enum):
+    LOW = "low"
+    HIGH = "high"
+
+
+@dataclass
+class RichTicket:
+    title: str
+    priority: Priority
+    owner: str | None = None
+
+
+def test_parse_json_supports_enum_and_optional_fields() -> None:
+    res = parse_json('{"title":"Router cleanup","priority":"high"}', RichTicket)
+    assert res == RichTicket(title="Router cleanup", priority=Priority.HIGH, owner=None)
+
+
+def test_tavily_search_returns_simplified_results() -> None:
+    class FakeClient:
         def search(self, **kwargs):
             return {
                 "answer": "A short answer",
-                "results": [
-                    {
-                        "title": "Example",
-                        "url": "https://example.com",
-                        "content": "Snippet",
-                    }
-                ],
+                "results": [{"title": "Example", "url": "https://example.com", "content": "Snippet"}],
             }
 
-    tool = TavilyTool(api_key="test-key", tavily_client=FakeTavilyClient())
-    result = tool.search("python", limit=1)
+    tool = Tavily(api_key="test-key", client=FakeClient())
+    res = tool.search("python", limit=1)
 
-    assert result.metadata["answer"] == "A short answer"
-    assert result.output == [
-        {
-            "title": "Example",
-            "url": "https://example.com",
-            "content": "Snippet",
-        }
-    ]
+    assert res.meta["answer"] == "A short answer"
+    assert res.items == [{"title": "Example", "url": "https://example.com", "content": "Snippet"}]
 
 
-def test_tavily_tool_requires_api_key() -> None:
-    tool = TavilyTool(api_key=None)
-
-    with pytest.raises(ToolExecutionError):
+def test_tavily_requires_api_key() -> None:
+    tool = Tavily(api_key=None)
+    with pytest.raises(ToolError):
         tool.search("python")
 
 
-def test_tavily_tool_extract_returns_trimmed_content() -> None:
-    class FakeTavilyClient:
+def test_tavily_extract_returns_trimmed_content() -> None:
+    class FakeClient:
         def extract(self, **kwargs):
-            return {
-                "results": [
-                    {
-                        "url": kwargs["urls"][0],
-                        "raw_content": "A" * 400,
-                    }
-                ],
-            }
+            return {"results": [{"url": kwargs["urls"][0], "raw_content": "A" * 400}]}
 
-    tool = TavilyTool(api_key="test-key", tavily_client=FakeTavilyClient())
-    result = tool.extract("https://docs.example.com")
+    tool = Tavily(api_key="test-key", client=FakeClient())
+    res = tool.extract("https://docs.example.com")
 
-    assert result.output[0]["url"] == "https://docs.example.com"
-    assert result.output[0]["content"].endswith("...")
-
-
-def test_tavily_tool_crawl_returns_cleaned_items() -> None:
-    class FakeTavilyClient:
-        def crawl(self, **kwargs):
-            return {
-                "base_url": kwargs["url"],
-                "results": [
-                    {
-                        "url": "https://docs.example.com/retries",
-                        "title": "Retries",
-                        "content": "Retry guidance for network failures.",
-                    }
-                ],
-            }
-
-    tool = TavilyTool(api_key="test-key", tavily_client=FakeTavilyClient())
-    result = tool.crawl("https://docs.example.com", instructions="Focus on retries")
-
-    assert result.metadata["base_url"] == "https://docs.example.com"
-    assert result.output == [
-        {
-            "title": "Retries",
-            "url": "https://docs.example.com/retries",
-            "content": "Retry guidance for network failures.",
-        }
-    ]
+    assert res.items[0]["url"] == "https://docs.example.com"
+    assert res.items[0]["content"].endswith("...")

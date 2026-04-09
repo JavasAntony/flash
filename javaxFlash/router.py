@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .config import normalize_provider_name
+from .config import norm_provider
 
 
 @dataclass(slots=True)
-class RouteDecision:
+class Route:
     provider: str
     reason: str
     score: int = 0
-    signals: tuple[str, ...] = field(default_factory=tuple)
+    signs: tuple[str, ...] = field(default_factory=tuple)
 
 
-class FlashRouter:
-    COMPLEX_KEYWORDS = {
+class Router:
+    HARD = {
         "debug",
         "bug",
         "error",
@@ -37,7 +37,7 @@ class FlashRouter:
         "algorithm",
         "root cause",
     }
-    SIMPLE_PREFIXES = (
+    EASY = (
         "apa ",
         "what ",
         "who ",
@@ -51,93 +51,77 @@ class FlashRouter:
     def __init__(
         self,
         *,
-        complex_keywords: set[str] | None = None,
-        simple_prefixes: tuple[str, ...] | None = None,
-        quick_prompt_word_limit: int = 12,
-        short_question_word_limit: int = 20,
-    ):
-        self.complex_keywords = complex_keywords or self.COMPLEX_KEYWORDS
-        self.simple_prefixes = simple_prefixes or self.SIMPLE_PREFIXES
-        self.quick_prompt_word_limit = quick_prompt_word_limit
-        self.short_question_word_limit = short_question_word_limit
+        hard: set[str] | None = None,
+        easy: tuple[str, ...] | None = None,
+        quick_words: int = 12,
+        short_q_words: int = 20,
+    ) -> None:
+        self.hard = hard or self.HARD
+        self.easy = easy or self.EASY
+        self.quick_words = quick_words
+        self.short_q_words = short_q_words
 
-    def choose(
+    def pick(
         self,
         prompt: str,
         mode: str | None = None,
-        forced_provider: str | None = None,
-        auto_route: bool = True,
-        default_provider: str = "flash",
-    ) -> RouteDecision:
-        if forced_provider:
-            canonical_provider = normalize_provider_name(forced_provider)
-            return RouteDecision(
-                provider=canonical_provider,
-                reason=f"provider forced explicitly: {canonical_provider}",
-            )
+        force: str | None = None,
+        auto: bool = True,
+        default: str = "flash",
+    ) -> Route:
+        if force:
+            name = norm_provider(force)
+            return Route(provider=name, reason=f"provider forced explicitly: {name}")
 
-        normalized_prompt = prompt.strip().lower()
-        normalized_default = normalize_provider_name(default_provider)
+        text = prompt.strip().lower()
+        base = norm_provider(default)
 
         if mode == "reasoning":
-            return RouteDecision(
-                provider="deepseek",
-                reason="reasoning mode requested",
-            )
+            return Route(provider="deepseek", reason="reasoning mode requested")
         if mode == "fast":
-            return RouteDecision(
-                provider="flash",
-                reason="fast mode requested",
-            )
+            return Route(provider="flash", reason="fast mode requested")
+        if not auto:
+            return Route(provider=base, reason=f"auto routing disabled, using default provider {base}")
 
-        if not auto_route:
-            return RouteDecision(
-                provider=normalized_default,
-                reason=f"auto routing disabled, using default provider {normalized_default}",
-            )
-
-        signals: list[str] = []
         score = 0
+        signs: list[str] = []
 
-        if any(token in normalized_prompt for token in self.complex_keywords):
+        if any(token in text for token in self.hard):
             score += 2
-            signals.append("complex keyword match")
+            signs.append("complex keyword match")
 
-        word_count = len(normalized_prompt.split())
-        if word_count >= 40:
+        words = len(text.split())
+        if words >= 40:
             score += 1
-            signals.append("long prompt")
+            signs.append("long prompt")
 
-        if any(marker in normalized_prompt for marker in ("```", "stack", "exception", "latency")):
+        if any(mark in text for mark in ("```", "stack", "exception", "latency")):
             score += 1
-            signals.append("engineering-heavy prompt")
+            signs.append("engineering-heavy prompt")
 
-        if normalized_prompt.startswith(self.simple_prefixes):
+        if text.startswith(self.easy):
             score -= 1
-            signals.append("simple prompt prefix")
+            signs.append("simple prompt prefix")
 
-        if word_count <= self.quick_prompt_word_limit:
+        if words <= self.quick_words:
             score -= 1
-            signals.append("short prompt")
+            signs.append("short prompt")
 
-        if "?" in normalized_prompt and word_count <= self.short_question_word_limit:
+        if "?" in text and words <= self.short_q_words:
             score -= 1
-            signals.append("quick question")
+            signs.append("quick question")
 
         if score >= 2:
-            return RouteDecision(
+            return Route(
                 provider="deepseek",
                 reason="auto route selected deepseek for a more complex prompt",
                 score=score,
-                signals=tuple(signals),
+                signs=tuple(signs),
             )
 
-        return RouteDecision(
+        return Route(
             provider="flash",
             reason="auto route selected flash for a lighter or direct prompt",
             score=score,
-            signals=tuple(signals),
+            signs=tuple(signs),
         )
-
-
-PromptRouter = FlashRouter

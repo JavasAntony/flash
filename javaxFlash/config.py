@@ -2,178 +2,160 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+from typing import Any, Callable
 
 
-PROVIDER_ALIASES = {
+ALIASES = {
     "gemini": "flash",
 }
-DEFAULT_PROVIDER_MODELS = {
+MODELS = {
     "flash": "gemini-2.0-flash-lite",
     "deepseek": "deepseek-reasoner",
 }
-DEFAULT_RETRY_STATUS_CODES = (408, 425, 429, 500, 502, 503, 504)
+RETRY_CODES = (408, 425, 429, 500, 502, 503, 504)
 
 
-def normalize_provider_name(provider: str) -> str:
-    normalized = provider.strip().lower()
-    return PROVIDER_ALIASES.get(normalized, normalized)
+def norm_provider(name: str) -> str:
+    key = name.strip().lower()
+    return ALIASES.get(key, key)
 
 
-def _parse_bool(value: str) -> bool:
+def _to_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_status_codes(value: str) -> tuple[int, ...]:
-    return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+def _to_codes(value: str) -> tuple[int, ...]:
+    return tuple(int(part.strip()) for part in value.split(",") if part.strip())
 
 
-def _parse_provider_models(value: str) -> dict[str, str]:
-    models: dict[str, str] = {}
-    for item in value.split(","):
-        chunk = item.strip()
-        if not chunk or "=" not in chunk:
+def _to_models(value: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in value.split(","):
+        item = part.strip()
+        if not item or "=" not in item:
             continue
-        provider, model = chunk.split("=", 1)
-        models[normalize_provider_name(provider)] = model.strip()
-    return models
+        name, model = item.split("=", 1)
+        out[norm_provider(name)] = model.strip()
+    return out
 
 
 @dataclass(slots=True)
-class FlashConfig:
+class Config:
     timeout: float = 30.0
-    max_retries: int = 2
-    backoff_base: float = 0.5
-    backoff_multiplier: float = 2.0
+    retries: int = 2
+    backoff: float = 0.5
+    backoff_rate: float = 2.0
     backoff_max: float = 8.0
     jitter: float = 0.15
-    retry_status_codes: tuple[int, ...] = DEFAULT_RETRY_STATUS_CODES
-    default_provider: str = "flash"
-    default_model: str | None = None
-    provider_models: dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_PROVIDER_MODELS)
-    )
-    deepseek_temperature: float = 0.7
+    retry_codes: tuple[int, ...] = RETRY_CODES
+    provider: str = "flash"
+    model: str | None = None
+    models: dict[str, str] = field(default_factory=lambda: dict(MODELS))
+    deepseek_temp: float = 0.7
     auto_route: bool = True
     debug: bool = False
-    request_logging: bool = False
-    fallback_enabled: bool = True
+    log_req: bool = False
+    fallback: bool = True
     fallback_provider: str | None = None
-    capture_raw_response: bool = False
+    raw: bool = False
     auto_search: bool = False
-    tavily_api_key: str | None = None
-    search_tool_name: str = "tavily"
-    search_max_results: int = 5
+    auto_tools: bool = False
+    tavily_key: str | None = None
+    search_tool: str = "tavily"
+    search_limit: int = 5
     search_timeout: float = 20.0
-    load_from_env: bool = False
+    env: bool = False
     env_prefix: str = "JAVAXFLASH_"
-    default_system_instruction: str = (
-        "You are javaxFlash, a practical, concise, and reliable AI assistant."
-    )
+    system: str = "You are javaxFlash, a practical, concise, and reliable AI assistant."
+    hooks: tuple[Callable[[str, dict[str, Any]], None], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.load_from_env:
-            self._apply_env_overrides()
-
-        self.default_provider = normalize_provider_name(self.default_provider)
+        if self.env:
+            self._load_env()
+        self.provider = norm_provider(self.provider)
         if self.fallback_provider:
-            self.fallback_provider = normalize_provider_name(self.fallback_provider)
-        self.provider_models = {
-            normalize_provider_name(provider): model
-            for provider, model in self.provider_models.items()
-        }
+            self.fallback_provider = norm_provider(self.fallback_provider)
+        self.models = {norm_provider(name): model for name, model in self.models.items()}
 
     @classmethod
-    def from_env(cls, prefix: str = "JAVAXFLASH_", **overrides: object) -> FlashConfig:
-        return cls(load_from_env=True, env_prefix=prefix, **overrides)
+    def from_env(cls, prefix: str = "JAVAXFLASH_", **overrides: object) -> Config:
+        return cls(env=True, env_prefix=prefix, **overrides)
 
     @property
-    def default_gemini_model(self) -> str:
-        return self.provider_models.get("flash", DEFAULT_PROVIDER_MODELS["flash"])
+    def flash_model(self) -> str:
+        return self.models.get("flash", MODELS["flash"])
 
     @property
-    def default_model_name(self) -> str:
-        return self.default_model or self.default_gemini_model
+    def main_model(self) -> str:
+        return self.model or self.flash_model
 
-    def resolve_model(self, provider: str, requested_model: str | None = None) -> str:
-        canonical_provider = normalize_provider_name(provider)
-        if requested_model:
-            return requested_model
-        if self.default_model and canonical_provider == self.default_provider:
-            return self.default_model
-        return self.provider_models.get(
-            canonical_provider,
-            self.default_model or canonical_provider,
-        )
+    def pick_model(self, provider: str, asked: str | None = None) -> str:
+        name = norm_provider(provider)
+        if asked:
+            return asked
+        if self.model and name == self.provider:
+            return self.model
+        return self.models.get(name, self.model or name)
 
-    def _apply_env_overrides(self) -> None:
-        prefix = self.env_prefix
+    def _load_env(self) -> None:
         env = os.environ
+        pre = self.env_prefix
 
-        float_fields = {
+        floats = {
             "timeout": "TIMEOUT",
-            "backoff_base": "BACKOFF_BASE",
-            "backoff_multiplier": "BACKOFF_MULTIPLIER",
+            "backoff": "BACKOFF_BASE",
+            "backoff_rate": "BACKOFF_MULTIPLIER",
             "backoff_max": "BACKOFF_MAX",
             "jitter": "JITTER",
-            "deepseek_temperature": "DEEPSEEK_TEMPERATURE",
+            "deepseek_temp": "DEEPSEEK_TEMPERATURE",
+            "search_timeout": "SEARCH_TIMEOUT",
         }
-        int_fields = {
-            "max_retries": "MAX_RETRIES",
+        ints = {
+            "retries": "MAX_RETRIES",
+            "search_limit": "SEARCH_MAX_RESULTS",
         }
-        bool_fields = {
+        bools = {
             "auto_route": "AUTO_ROUTE",
             "debug": "DEBUG",
-            "request_logging": "REQUEST_LOGGING",
-            "fallback_enabled": "FALLBACK_ENABLED",
-            "capture_raw_response": "CAPTURE_RAW_RESPONSE",
+            "log_req": "REQUEST_LOGGING",
+            "fallback": "FALLBACK_ENABLED",
+            "raw": "CAPTURE_RAW_RESPONSE",
             "auto_search": "AUTO_SEARCH",
+            "auto_tools": "ENABLE_AUTO_SKILLS",
         }
-        str_fields = {
-            "default_provider": "DEFAULT_PROVIDER",
-            "default_model": "DEFAULT_MODEL",
+        texts = {
+            "provider": "DEFAULT_PROVIDER",
+            "model": "DEFAULT_MODEL",
             "fallback_provider": "FALLBACK_PROVIDER",
-            "default_system_instruction": "DEFAULT_SYSTEM_INSTRUCTION",
-            "tavily_api_key": "TAVILY_API_KEY",
-            "search_tool_name": "SEARCH_TOOL_NAME",
+            "system": "DEFAULT_SYSTEM_INSTRUCTION",
+            "tavily_key": "TAVILY_API_KEY",
+            "search_tool": "SEARCH_TOOL_NAME",
         }
-        int_fields.update(
-            {
-                "search_max_results": "SEARCH_MAX_RESULTS",
-            }
-        )
-        float_fields.update(
-            {
-                "search_timeout": "SEARCH_TIMEOUT",
-            }
-        )
 
-        for field_name, suffix in float_fields.items():
-            raw_value = env.get(f"{prefix}{suffix}")
-            if raw_value:
-                setattr(self, field_name, float(raw_value))
+        for key, suffix in floats.items():
+            value = env.get(f"{pre}{suffix}")
+            if value:
+                setattr(self, key, float(value))
 
-        for field_name, suffix in int_fields.items():
-            raw_value = env.get(f"{prefix}{suffix}")
-            if raw_value:
-                setattr(self, field_name, int(raw_value))
+        for key, suffix in ints.items():
+            value = env.get(f"{pre}{suffix}")
+            if value:
+                setattr(self, key, int(value))
 
-        for field_name, suffix in bool_fields.items():
-            raw_value = env.get(f"{prefix}{suffix}")
-            if raw_value is not None:
-                setattr(self, field_name, _parse_bool(raw_value))
+        for key, suffix in bools.items():
+            value = env.get(f"{pre}{suffix}")
+            if value is not None:
+                setattr(self, key, _to_bool(value))
 
-        for field_name, suffix in str_fields.items():
-            raw_value = env.get(f"{prefix}{suffix}")
-            if raw_value:
-                setattr(self, field_name, raw_value)
+        for key, suffix in texts.items():
+            value = env.get(f"{pre}{suffix}")
+            if value:
+                setattr(self, key, value)
 
-        raw_status_codes = env.get(f"{prefix}RETRY_STATUS_CODES")
-        if raw_status_codes:
-            self.retry_status_codes = _parse_status_codes(raw_status_codes)
+        value = env.get(f"{pre}RETRY_STATUS_CODES")
+        if value:
+            self.retry_codes = _to_codes(value)
 
-        raw_provider_models = env.get(f"{prefix}PROVIDER_MODELS")
-        if raw_provider_models:
-            self.provider_models.update(_parse_provider_models(raw_provider_models))
-
-
-AIClientConfig = FlashConfig
+        value = env.get(f"{pre}PROVIDER_MODELS")
+        if value:
+            self.models.update(_to_models(value))
