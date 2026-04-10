@@ -1,29 +1,29 @@
 from __future__ import annotations
 
-from javaxFlash import Config
-from javaxFlash.router import Router
+from lunox import Config
+from lunox.router import Router
 
 
 def test_config_from_env_loads_retry_and_provider_settings(monkeypatch) -> None:
-    monkeypatch.setenv("JAVAXFLASH_TIMEOUT", "15")
-    monkeypatch.setenv("JAVAXFLASH_MAX_RETRIES", "4")
-    monkeypatch.setenv("JAVAXFLASH_DEFAULT_PROVIDER", "gemini")
-    monkeypatch.setenv("JAVAXFLASH_FALLBACK_PROVIDER", "deepseek")
-    monkeypatch.setenv("JAVAXFLASH_PROVIDER_MODELS", "flash=gemini-2.5-flash,deepseek=deepseek-r1")
+    monkeypatch.setenv("LUNOX_TIMEOUT", "15")
+    monkeypatch.setenv("LUNOX_MAX_RETRIES", "4")
+    monkeypatch.setenv("LUNOX_DEFAULT_PROVIDER", "gemini")
+    monkeypatch.setenv("LUNOX_FALLBACK_PROVIDER", "deepseek")
+    monkeypatch.setenv("LUNOX_PROVIDER_MODELS", "gemini=gemini-2.5-flash,deepseek=deepseek-r1")
 
     cfg = Config.from_env()
 
     assert cfg.timeout == 15.0
     assert cfg.retries == 4
-    assert cfg.provider == "flash"
+    assert cfg.provider == "gemini"
     assert cfg.fallback_provider == "deepseek"
-    assert cfg.flash_model == "gemini-2.5-flash"
+    assert cfg.gemini_model == "gemini-2.5-flash"
 
 
 def test_pick_model_prefers_explicit_default_for_main_provider() -> None:
-    cfg = Config(provider="flash", model="flash-custom")
+    cfg = Config(provider="gemini", model="gemini-custom")
 
-    assert cfg.pick_model("flash") == "flash-custom"
+    assert cfg.pick_model("gemini") == "gemini-custom"
     assert cfg.pick_model("deepseek") == cfg.models["deepseek"]
 
 
@@ -49,5 +49,5 @@ def test_router_uses_main_provider_when_auto_route_is_disabled() -> None:
         default="gemini",
     )
 
-    assert route.provider == "flash"
-    assert route.reason == "auto routing disabled, using default provider flash"
+    assert route.provider == "gemini"
+    assert route.reason == "auto routing disabled, using default provider gemini"

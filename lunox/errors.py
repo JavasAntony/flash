@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 class AppError(Exception):
-    """Base error for javaxFlash."""
+    """Base error for Lunox."""
 
 
 class ProviderError(AppError):

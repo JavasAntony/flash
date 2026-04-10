@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from javaxFlash import Client, Config, ProviderError, RetryError, TimeoutError
+from lunox import Client, Config, ProviderError, RetryError, TimeoutError
 
 cfg = Config(
     timeout=20.0,
@@ -15,10 +15,11 @@ cfg = Config(
     debug=True,
 )
 
+
 def main() -> None:
     client = Client(cfg=cfg)
     try:
-        res = client.flash("Summarize retry strategies for HTTP clients.")
+        res = client.ask("Summarize retry strategies for HTTP clients.")
         print(res.text)
         print("Retries used:", res.retries)
     except (TimeoutError, RetryError, ProviderError) as err:

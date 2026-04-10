@@ -1,22 +1,21 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68,<77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "javaxFlash"
-version = "3.5.0"
-description = "Lightweight Python AI client/router with async support, local tools, observability hooks, retries, and structured output."
+name = "lunox"
+version = "5.0.0"
+description = "Lightweight Python AI client/router with async support, local tools, observability hooks, retries, structured output, and lightweight conversation history."
 readme = "README.md"
-license = "MIT"
+license = { text = "MIT" }
 authors = [
   { name = "Javas Antony" }
 ]
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.31.0",
-  "tavily-python>=0.7.0",
 ]
-keywords = ["ai", "client", "router", "sdk", "gemini", "deepseek"]
+keywords = ["ai", "client", "router", "sdk", "gemini", "deepseek", "lunox"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
@@ -28,15 +27,18 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+tavily = [
+  "tavily-python>=0.7.0",
+]
 dev = [
   "pytest>=9.0",
 ]
 
 [tool.setuptools]
-packages = ["javaxFlash"]
+packages = ["lunox"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [project.urls]
-"Homepage" = "https://pypi.org/project/javaxFlash/"
+"Homepage" = "https://pypi.org/project/lunox/"

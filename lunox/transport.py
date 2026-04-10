@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import random
 import time
 from typing import Any
@@ -11,12 +10,14 @@ from .config import Config
 from .errors import ProviderError, RetryError, TimeoutError
 
 
-@dataclass(slots=True)
 class NetRes:
-    data: Any
-    status: int
-    retries: int
-    latency: float
+    __slots__ = ("data", "status", "retries", "latency")
+
+    def __init__(self, data: Any, status: int, retries: int, latency: float) -> None:
+        self.data = data
+        self.status = status
+        self.retries = retries
+        self.latency = latency
 
 
 class Transport:

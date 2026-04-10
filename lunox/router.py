@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from .config import norm_provider
 
 
-@dataclass(slots=True)
 class Route:
-    provider: str
-    reason: str
-    score: int = 0
-    signs: tuple[str, ...] = field(default_factory=tuple)
+    __slots__ = ("provider", "reason", "score", "signs")
+
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        *,
+        score: int = 0,
+        signs: tuple[str, ...] = (),
+    ) -> None:
+        self.provider = provider
+        self.reason = reason
+        self.score = score
+        self.signs = signs
 
 
 class Router:
@@ -67,7 +74,7 @@ class Router:
         mode: str | None = None,
         force: str | None = None,
         auto: bool = True,
-        default: str = "flash",
+        default: str = "gemini",
     ) -> Route:
         if force:
             name = norm_provider(force)
@@ -79,7 +86,7 @@ class Router:
         if mode == "reasoning":
             return Route(provider="deepseek", reason="reasoning mode requested")
         if mode == "fast":
-            return Route(provider="flash", reason="fast mode requested")
+            return Route(provider="gemini", reason="fast mode requested")
         if not auto:
             return Route(provider=base, reason=f"auto routing disabled, using default provider {base}")
 
@@ -120,8 +127,8 @@ class Router:
             )
 
         return Route(
-            provider="flash",
-            reason="auto route selected flash for a lighter or direct prompt",
+            provider="gemini",
+            reason="auto route selected gemini for a lighter or direct prompt",
             score=score,
             signs=tuple(signs),
         )

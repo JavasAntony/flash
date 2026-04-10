@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 import os
 from typing import Any, Callable
 
@@ -13,11 +12,18 @@ except ImportError:  # pragma: no cover
     TavilyClient = None  # type: ignore[assignment]
 
 
-@dataclass(slots=True)
 class ToolRes:
-    name: str
-    items: list[dict[str, Any]]
-    meta: dict[str, Any] = field(default_factory=dict)
+    __slots__ = ("name", "items", "meta")
+
+    def __init__(
+        self,
+        name: str,
+        items: list[dict[str, Any]],
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.items = items
+        self.meta = {} if meta is None else meta
 
     def as_text(self, head: str) -> str:
         lines = [head]

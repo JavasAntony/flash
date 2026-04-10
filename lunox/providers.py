@@ -113,8 +113,8 @@ class Provider(ABC):
         return (think, final)
 
 
-class Flash(Provider):
-    name = "flash"
+class Gemini(Provider):
+    name = "gemini"
     url = "https://api.siputzx.my.id/api/ai/gemini-lite"
     caps = Caps(cost="low")
 
@@ -136,12 +136,14 @@ class DeepSeek(Provider):
     url = "https://api.siputzx.my.id/api/ai/deepseekr1"
 
     def build(self, req: Req) -> dict[str, Any]:
-        return {
+        data = {
             "prompt": req.prompt,
             "model": self.cfg.pick_model(self.name, req.model),
-            "system": req.system or self.cfg.system,
             "temperature": req.opts.get("temperature", self.cfg.deepseek_temp),
         }
+        if req.system:
+            data["system"] = req.system
+        return data
 
 
 class ProviderMap:

@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields, is_dataclass
 from enum import Enum
 import json
 from types import UnionType
-from typing import Any, Literal, Mapping, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Mapping, Union, get_args, get_origin
 
 from .errors import SchemaError
 
 
-@dataclass(slots=True)
 class Schema:
-    name: str
-    fields: Mapping[str, Any]
-    strict: bool = True
+    __slots__ = ("name", "fields", "strict")
+
+    def __init__(self, name: str, fields: Mapping[str, Any], *, strict: bool = True) -> None:
+        self.name = name
+        self.fields = fields
+        self.strict = strict
 
 
-SchemaLike = Schema | Mapping[str, Any] | type
+SchemaLike = Schema | Mapping[str, Any]
 
 
 def schema_note(shape: SchemaLike) -> str:
@@ -32,14 +33,11 @@ def parse_json(text: str, shape: SchemaLike) -> Any:
     return _check(data, shape, path="$")
 
 
-def describe(shape: SchemaLike) -> Any:
+def describe(shape: SchemaLike | Any) -> Any:
     if isinstance(shape, Schema):
         return {key: describe(value) for key, value in shape.fields.items()}
     if isinstance(shape, Mapping):
         return {key: describe(value) for key, value in shape.items()}
-    if _is_dc(shape):
-        hints = get_type_hints(shape)
-        return {item.name: describe(hints[item.name]) for item in fields(shape)}
 
     origin = get_origin(shape)
     args = get_args(shape)
@@ -97,8 +95,6 @@ def _check(value: Any, shape: SchemaLike | Any, *, path: str) -> Any:
         return _map(value, shape.fields, path=path, strict=shape.strict)
     if isinstance(shape, Mapping):
         return _map(value, shape, path=path, strict=True)
-    if _is_dc(shape):
-        return shape(**_dc(value, shape, path=path))
 
     origin = get_origin(shape)
     args = get_args(shape)
@@ -173,22 +169,6 @@ def _map(value: Any, shape: Mapping[str, Any], *, path: str, strict: bool) -> di
         else:
             out[key] = _check(value[key], item_shape, path=f"{path}.{key}")
     return out
-
-
-def _dc(value: Any, shape: type, *, path: str) -> dict[str, Any]:
-    hints = get_type_hints(shape)
-    schema = {item.name: hints[item.name] for item in fields(shape)}
-    out = _map(value, schema, path=path, strict=True)
-    for item in fields(shape):
-        if item.name not in value and item.default is not MISSING:
-            out[item.name] = item.default
-        elif item.name not in value and item.default_factory is not MISSING:
-            out[item.name] = item.default_factory()
-    return out
-
-
-def _is_dc(value: Any) -> bool:
-    return isinstance(value, type) and is_dataclass(value)
 
 
 def _is_opt(shape: Any) -> bool:

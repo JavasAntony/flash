@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import sys
+import time
 from typing import Any
 
 from .config import Config, norm_provider
 from .errors import MissingProviderError, ProviderError
 from .models import Caps, Req, Res
-from .providers import DeepSeek, Flash, ProviderMap
+from .providers import DeepSeek, Gemini, ProviderMap
 from .router import Router
 from .schema import SchemaLike, parse_json, schema_note
 from .tools import FuncTool, Tavily, Tool, ToolMap, ToolRes
@@ -29,11 +30,11 @@ class Client:
         self.router = router or Router()
         self.tools = tools or ToolMap()
         self.provider_map = ProviderMap(
-            providers or (Flash(self.cfg, self.net), DeepSeek(self.cfg, self.net))
+            providers or (Gemini(self.cfg, self.net), DeepSeek(self.cfg, self.net))
         )
         self.providers = self.provider_map.items
 
-    def flash(
+    def ask(
         self,
         prompt: str,
         *,
@@ -51,16 +52,19 @@ class Client:
         search_query: str | None = None,
         urls: str | list[str] | tuple[str, ...] | None = None,
         tool_calls: dict[str, dict[str, Any]] | None = None,
+        history: list[tuple[str, str]] | None = None,
+        history_limit: int | None = None,
         **opts: Any,
     ) -> Res:
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
 
+        chat_prompt = self._history_prompt(prompt, history)
         auto = self.cfg.auto_route if auto_route is None else auto_route
         forced = norm_provider(provider) if provider else None
         backup = self._fallback_name(fallback)
         route = self.router.pick(
-            prompt=prompt,
+            prompt=chat_prompt,
             mode=mode,
             force=forced,
             auto=auto,
@@ -68,19 +72,20 @@ class Client:
         )
 
         req = Req(
-            prompt=prompt,
-            system=self._system(system, schema),
+            prompt=chat_prompt,
+            system=None,
             model=model,
             raw=self.cfg.raw if raw is None else raw,
             schema=schema,
             opts=dict(opts),
         )
         self._emit(
-            "flash_requested",
+            "ask_requested",
             prompt=prompt,
             provider=forced or route.provider,
             mode=mode,
             schema_used=schema is not None,
+            history_used=bool(history),
         )
         skill_ctx = self._skill_ctx(
             prompt=prompt,
@@ -91,7 +96,7 @@ class Client:
             urls=urls,
         )
         tool_ctx = self._tool_ctx(tool_calls)
-        req.prompt = self._prompt(prompt, schema, skill_ctx, tool_ctx)
+        req.prompt = self._prompt(chat_prompt, schema, skill_ctx, tool_ctx, instruction=system)
 
         try:
             res = self.provider_map.get(route.provider).run(req)
@@ -126,6 +131,7 @@ class Client:
         if tool_ctx is not None:
             res.tools = tuple(tool_ctx["tools"])
         res.caps = self.provider_map.caps_for(res.provider)
+        self._append_history(history, prompt, res.text, history_limit)
         self._emit(
             "response_received",
             provider=res.provider,
@@ -134,9 +140,6 @@ class Client:
             retry_count=res.retries,
         )
         return res
-
-    def ask(self, prompt: str, **kwargs: Any) -> Res:
-        return self.flash(prompt, **kwargs)
 
     def add_tool(self, tool: Tool) -> Tool:
         self.tools.add(tool)
@@ -209,6 +212,29 @@ class Client:
         item.name = tool
         return self.add_tool(item)
 
+    def type_out(
+        self,
+        text: str,
+        *,
+        delay: float = 0.02,
+        end: str = "\n",
+        stream: Any = None,
+    ) -> str:
+        target = sys.stdout if stream is None else stream
+        for char in text:
+            target.write(char)
+            target.flush()
+            if delay > 0:
+                time.sleep(delay)
+        if end:
+            target.write(end)
+            target.flush()
+        return text
+
+    def show(self, res: Res | str, *, delay: float = 0.02, end: str = "\n", stream: Any = None) -> str:
+        text = res.text if isinstance(res, Res) else str(res)
+        return self.type_out(text, delay=delay, end=end, stream=stream)
+
     def _fallback(self, *, req: Req, provider: str, backup: str, err: ProviderError, reason: str) -> Res:
         try:
             res = self.provider_map.get(backup).run(req)
@@ -232,8 +258,14 @@ class Client:
         schema: SchemaLike | None,
         skill_ctx: dict[str, Any] | None,
         tool_ctx: dict[str, Any] | None,
+        *,
+        instruction: str | None,
     ) -> str:
-        parts = [prompt.rstrip()]
+        parts: list[str] = []
+        head = self._instruction(instruction, schema)
+        if head:
+            parts.append(head)
+        parts.append(prompt.rstrip())
         if skill_ctx is not None:
             parts.append(
                 "\n".join(
@@ -257,11 +289,17 @@ class Client:
             parts.append(schema_note(schema))
         return "\n\n".join(part for part in parts if part)
 
-    def _system(self, system: str | None, schema: SchemaLike | None) -> str:
-        text = system or self.cfg.system
-        if schema is None:
-            return text
-        return f"{text.rstrip()}\nReturn only valid JSON with no markdown fences or extra commentary."
+    def _instruction(self, system: str | None, schema: SchemaLike | None) -> str:
+        text = (system or self.cfg.custom_instruction or "").strip()
+        if not text and schema is None:
+            return ""
+        parts: list[str] = []
+        if text:
+            parts.append("Instruction:")
+            parts.append(text)
+        if schema is not None:
+            parts.append("Return only valid JSON with no markdown fences or extra commentary.")
+        return "\n".join(parts)
 
     def _emit(self, event: str, **data: Any) -> None:
         for hook in self.cfg.hooks:
@@ -418,7 +456,7 @@ class Client:
         return res.as_text(head)
 
     def _other(self, provider: str) -> str:
-        return "deepseek" if provider == "flash" else "flash"
+        return "deepseek" if provider == "gemini" else "gemini"
 
     def _can_fallback(self, provider: str, backup: str | None) -> bool:
         if not self.cfg.fallback and not backup:
@@ -430,55 +468,71 @@ class Client:
             return False
         return name != provider
 
-
-@dataclass(slots=True)
-class Session:
-    client: Client
-    system: str | None = None
-    max_turns: int | None = None
-    history: list[tuple[str, str]] = field(default_factory=list)
-
-    def ask(self, prompt: str, **kwargs: Any) -> Res:
-        full = self._prompt(prompt)
-        res = self.client.flash(full, system=self.system, **kwargs)
-        self.history.append(("user", prompt))
-        self.history.append(("assistant", res.text))
-        self._trim()
-        return res
-
-    def flash(self, prompt: str, **kwargs: Any) -> Res:
-        return self.ask(prompt, **kwargs)
-
-    def reset(self) -> None:
-        self.history.clear()
-
-    def _prompt(self, prompt: str) -> str:
-        if not self.history:
+    def _history_prompt(self, prompt: str, history: list[tuple[str, str]] | None) -> str:
+        if not history:
             return prompt
         lines = ["Conversation so far:"]
-        for role, text in self.history:
+        for role, text in history:
             lines.append(f"{role.title()}: {text}")
         lines.append(f"User: {prompt}")
         lines.append("Assistant:")
         return "\n".join(lines)
 
-    def _trim(self) -> None:
-        if self.max_turns is None or self.max_turns <= 0:
+    def _append_history(
+        self,
+        history: list[tuple[str, str]] | None,
+        prompt: str,
+        reply: str,
+        history_limit: int | None,
+    ) -> None:
+        if history is None:
             return
-        size = self.max_turns * 2
-        if len(self.history) > size:
-            self.history = self.history[-size:]
+        history.append(("user", prompt))
+        history.append(("assistant", reply))
+        if history_limit is None or history_limit <= 0:
+            return
+        if len(history) > history_limit:
+            del history[:-history_limit]
+
+
+class Session:
+    def __init__(
+        self,
+        *,
+        client: Client,
+        system: str | None = None,
+        max_turns: int | None = None,
+        history: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.client = client
+        self.system = system
+        self.max_turns = max_turns
+        self.history = [] if history is None else history
+
+    def ask(self, prompt: str, **kwargs: Any) -> Res:
+        return self.client.ask(
+            prompt,
+            system=self.system,
+            history=self.history,
+            history_limit=self._history_limit(),
+            **kwargs,
+        )
+
+    def reset(self) -> None:
+        self.history.clear()
+
+    def _history_limit(self) -> int | None:
+        if self.max_turns is None or self.max_turns <= 0:
+            return None
+        return self.max_turns * 2
 
 
 class AsyncClient:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._client = Client(*args, **kwargs)
 
-    async def flash(self, prompt: str, **kwargs: Any) -> Res:
-        return await asyncio.to_thread(self._client.flash, prompt, **kwargs)
-
     async def ask(self, prompt: str, **kwargs: Any) -> Res:
-        return await self.flash(prompt, **kwargs)
+        return await asyncio.to_thread(self._client.ask, prompt, **kwargs)
 
     def add_tool(self, tool: Tool) -> Tool:
         return self._client.add_tool(tool)
@@ -502,43 +556,36 @@ class AsyncClient:
         return self._client.get_caps(provider)
 
     def session(self, *, system: str | None = None, max_turns: int | None = None) -> AsyncSession:
-        return AsyncSession(self, system=system, max_turns=max_turns)
+        return AsyncSession(client=self, system=system, max_turns=max_turns)
 
 
-@dataclass(slots=True)
 class AsyncSession:
-    client: AsyncClient
-    system: str | None = None
-    max_turns: int | None = None
-    history: list[tuple[str, str]] = field(default_factory=list)
+    def __init__(
+        self,
+        *,
+        client: AsyncClient,
+        system: str | None = None,
+        max_turns: int | None = None,
+        history: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.client = client
+        self.system = system
+        self.max_turns = max_turns
+        self.history = [] if history is None else history
 
     async def ask(self, prompt: str, **kwargs: Any) -> Res:
-        full = self._prompt(prompt)
-        res = await self.client.flash(full, system=self.system, **kwargs)
-        self.history.append(("user", prompt))
-        self.history.append(("assistant", res.text))
-        self._trim()
-        return res
-
-    async def flash(self, prompt: str, **kwargs: Any) -> Res:
-        return await self.ask(prompt, **kwargs)
+        return await self.client.ask(
+            prompt,
+            system=self.system,
+            history=self.history,
+            history_limit=self._history_limit(),
+            **kwargs,
+        )
 
     def reset(self) -> None:
         self.history.clear()
 
-    def _prompt(self, prompt: str) -> str:
-        if not self.history:
-            return prompt
-        lines = ["Conversation so far:"]
-        for role, text in self.history:
-            lines.append(f"{role.title()}: {text}")
-        lines.append(f"User: {prompt}")
-        lines.append("Assistant:")
-        return "\n".join(lines)
-
-    def _trim(self) -> None:
+    def _history_limit(self) -> int | None:
         if self.max_turns is None or self.max_turns <= 0:
-            return
-        size = self.max_turns * 2
-        if len(self.history) > size:
-            self.history = self.history[-size:]
+            return None
+        return self.max_turns * 2

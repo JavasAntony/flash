@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum
 from unittest.mock import Mock
 
 import pytest
 import requests
 
-from javaxFlash import Config, RetryError, Tavily, ToolError
-from javaxFlash.schema import parse_json
-from javaxFlash.transport import Transport
+from lunox import Config, RetryError, Schema, Tavily, ToolError
+from lunox.schema import parse_json
+from lunox.transport import Transport
 
 
 class DummyRes:
@@ -30,7 +29,7 @@ def test_transport_retries_once_on_rate_limit_then_succeeds() -> None:
     session = Mock()
     session.post.side_effect = [
         DummyRes(429, {"error": "slow down"}, text="slow down"),
-        DummyRes(200, {"text": "ok", "model": "flash"}),
+        DummyRes(200, {"text": "ok", "model": "gemini"}),
     ]
     delays: list[float] = []
     net = Transport(
@@ -40,7 +39,7 @@ def test_transport_retries_once_on_rate_limit_then_succeeds() -> None:
         rand=lambda start, end: 0.0,
     )
 
-    res = net.post(url="https://example.com", data={"prompt": "hello"}, provider="flash")
+    res = net.post(url="https://example.com", data={"prompt": "hello"}, provider="gemini")
 
     assert res.retries == 1
     assert delays == [0.5]
@@ -57,20 +56,9 @@ def test_transport_raises_retry_error_after_repeated_timeouts() -> None:
     )
 
     with pytest.raises(RetryError) as err:
-        net.post(url="https://example.com", data={"prompt": "hello"}, provider="flash")
+        net.post(url="https://example.com", data={"prompt": "hello"}, provider="gemini")
 
     assert err.value.tries == 3
-
-
-@dataclass
-class Ticket:
-    title: str
-    priority: str
-
-
-def test_parse_json_supports_dataclass_schemas() -> None:
-    res = parse_json('{"title":"Refactor router","priority":"medium"}', Ticket)
-    assert res == Ticket(title="Refactor router", priority="medium")
 
 
 class Priority(Enum):
@@ -78,16 +66,23 @@ class Priority(Enum):
     HIGH = "high"
 
 
-@dataclass
-class RichTicket:
-    title: str
-    priority: Priority
-    owner: str | None = None
-
-
 def test_parse_json_supports_enum_and_optional_fields() -> None:
-    res = parse_json('{"title":"Router cleanup","priority":"high"}', RichTicket)
-    assert res == RichTicket(title="Router cleanup", priority=Priority.HIGH, owner=None)
+    schema = Schema(
+        name="ticket",
+        fields={
+            "title": str,
+            "priority": Priority,
+            "owner": str | None,
+        },
+    )
+
+    res = parse_json('{"title":"Router cleanup","priority":"high"}', schema)
+    assert res == {"title": "Router cleanup", "priority": Priority.HIGH, "owner": None}
+
+
+def test_parse_json_supports_mapping_schemas() -> None:
+    res = parse_json('{"title":"Refactor router","priority":"medium"}', {"title": str, "priority": str})
+    assert res == {"title": "Refactor router", "priority": "medium"}
 
 
 def test_tavily_search_returns_simplified_results() -> None:
